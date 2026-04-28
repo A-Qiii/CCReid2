@@ -1,0 +1,14 @@
+# 数据集和缓存
+data/
+__pycache__/
+
+# 模型权重和日志
+*.pth
+*.pt
+*.ckpt
+logs/
+runs/
+output/
+
+# VS Code 配置文件
+.vscode/

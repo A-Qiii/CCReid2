@@ -1,0 +1,16 @@
+=> PRCC 数据集物理加载完毕
+   Train: 17896 张 | Query: 3543 张 | Gallery: 7257 张
+   Train PIDs: 150 | Cams: 3
+Resized position embedding: %s to %s torch.Size([197, 768]) torch.Size([289, 768])
+Position embedding resize to height:24 width: 12
+>>> 成功挂载权重: ./logs/exp1/model_60.pth
+Traceback (most recent call last):
+  File "/root/autodl-tmp/CCReID/test_prcc.py", line 80, in <module>
+    test(cfg)
+  File "/root/autodl-tmp/CCReID/test_prcc.py", line 23, in test
+    model.load_state_dict(torch.load(weight_path, map_location='cpu')) 
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/serialization.py", line 993, in load
+    with _open_zipfile_reader(opened_file) as opened_zipfile:
+  File "/root/miniconda3/lib/python3.10/site-packages/torch/serialization.py", line 447, in __init__
+    super().__init__(torch._C.PyTorchFileReader(name_or_buffer))
+RuntimeError: PytorchStreamReader failed reading zip archive: failed finding central directory

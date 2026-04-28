@@ -1,0 +1,53 @@
+MODEL:
+  PRETRAIN_CHOICE: 'imagenet'
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'on'
+  IF_WITH_CENTER: 'no'
+  NAME: 'ViT-B-16'
+  STRIDE_SIZE: [16, 16]
+  ID_LOSS_WEIGHT : 0.25
+  TRIPLET_LOSS_WEIGHT : 1.0
+  I2T_ID_WEIGHT : 0.0
+  I2T_CLOTH_WEIGHT : 0.0
+
+INPUT:
+  SIZE_TRAIN: [384, 192]
+  SIZE_TEST: [384, 192]
+  PROB: 0.5
+  RE_PROB: 0.7
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+
+DATASETS:
+  NAMES: ('ltcc')
+  ROOT_DIR: '/root/autodl-tmp/CCReID/data'
+  LLAVA_JSON_PATH: '/root/autodl-tmp/CCReID/data/ltcc_qwen2_final_labels.json' # 请替换为json所在路径
+
+DATALOADER:
+  SAMPLER: 'softmax_triplet'
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+SOLVER:
+  CHECKPOINT_PERIOD: 20
+  IMS_PER_BATCH: 64
+  OPTIMIZER_NAME: "Adam"
+  BASE_LR: 0.00001
+  WARMUP_LR_INIT: 0.000001
+  WARMUP_EPOCHS: 5
+  MAX_EPOCHS: 60
+  STEPS: [30, 50]
+  GAMMA: 0.1
+  WEIGHT_DECAY: 0.0001
+  WEIGHT_DECAY_BIAS: 0.0001
+  LARGE_FC_LR: True
+
+TEST:
+  EVALUATE_ONLY: 'False'
+  IMS_PER_BATCH: 128
+  RE_RANKING: 'False'
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: './logs/exp1'
