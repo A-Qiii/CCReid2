@@ -6,7 +6,8 @@ def weights_init_kaiming(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
         nn.init.kaiming_normal_(m.weight, a=0, mode='fan_out')
-        nn.init.constant_(m.bias, 0.0)
+        if m.bias is not None:  # <--- 加了这行安全判断
+            nn.init.constant_(m.bias, 0.0)
     elif classname.find('Conv') != -1:
         nn.init.kaiming_normal_(m.weight, a=0, mode='fan_in')
         if m.bias is not None:
@@ -20,7 +21,7 @@ def weights_init_classifier(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
         nn.init.normal_(m.weight, std=0.001)
-        if m.bias is not None:
+        if m.bias is not None:  # <--- 加了这行安全判断
             nn.init.constant_(m.bias, 0.0)
 
 class build_transformer(nn.Module):
@@ -69,6 +70,14 @@ class build_transformer(nn.Module):
         if self.cv_embed is not None:
             torch.nn.init.normal_(self.cv_embed, std=1e-6)
 
+
+        self.cloth_proj = nn.Sequential(
+            nn.Linear(self.joint_planes, self.joint_planes, bias=False),
+            nn.BatchNorm1d(self.joint_planes)
+        )
+
+        self.cloth_proj.apply(weights_init_kaiming)
+
         self.classifier = nn.Linear(self.joint_planes, num_classes, bias=False)
         self.classifier.apply(weights_init_classifier)
 
@@ -87,25 +96,25 @@ class build_transformer(nn.Module):
 
         _, _, image_features_proj = self.image_encoder(x, cv_embed)
         global_feat = image_features_proj[:, 0]
+        
         feat = self.bottleneck(global_feat)
 
         if self.training:
             id_tokens = clip.tokenize(id_text).to(x.device)
             cloth_tokens = clip.tokenize(cloth_text).to(x.device)
 
+            # 提取文本特征
             t_id = self.clip_model.encode_text(id_tokens)
             t_cloth = self.clip_model.encode_text(cloth_tokens)
 
-            # 身份对齐矩阵 (保持原样)
-            img_norm = global_feat / global_feat.norm(dim=-1, keepdim=True)
-            id_feat_norm = t_id / t_id.norm(dim=-1, keepdim=True)
-            scale = self.clip_model.logit_scale.exp()
-            score_i2t_id = scale * img_norm @ id_feat_norm.t()
+            # 投影出两个视觉衣服特征（阻断梯度泄露）
+            v_cloth_for_guide = self.cloth_proj(global_feat.detach())
+            v_cloth_for_ortho = self.cloth_proj(global_feat)
 
             cls_score = self.classifier(feat)
             
-            # 将 global_feat 和 原始 t_cloth 传给 loss 层进行截断正交计算
-            return cls_score, [global_feat, score_i2t_id, t_cloth]
+            # 返回解包序列
+            return cls_score, [global_feat, t_id, t_cloth, v_cloth_for_guide, v_cloth_for_ortho]
         else:
             return feat if self.neck_feat == 'after' else global_feat
 

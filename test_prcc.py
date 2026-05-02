@@ -15,7 +15,7 @@ def test(cfg):
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
     
     # 挂载 60 轮物理权重
-    weight_path = os.path.join(cfg.OUTPUT_DIR, "model_60.pth")
+    weight_path = os.path.join(cfg.OUTPUT_DIR, "model_40.pth")
     if not os.path.exists(weight_path):
         raise FileNotFoundError(f"找不到物理权重文件: {weight_path}")
     print(f">>> 成功挂载权重: {weight_path}")
