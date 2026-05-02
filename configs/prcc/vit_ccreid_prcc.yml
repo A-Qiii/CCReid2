@@ -5,11 +5,13 @@ MODEL:
   IF_WITH_CENTER: 'no'
   NAME: 'ViT-B-16'
   STRIDE_SIZE: [16, 16]
-  ID_LOSS_WEIGHT : 0.25
+  TRAIN_STAGE: 1              # 当前运行阶段一
+  PROMPT_LENGTH: 4            # M=4
+  ID_LOSS_WEIGHT : 1.0
   TRIPLET_LOSS_WEIGHT : 1.0
-  I2T_ID_WEIGHT : 1.0
-  I2T_CLOTH_GUIDE_WEIGHT : 0.5 
-  I2T_CLOTH_ORTHO_WEIGHT : 0.05
+  I2T_ID_WEIGHT : 1.0         # L_Guide
+  I2T_CLOTH_SC_WEIGHT : 1.0   # L_sc
+  I2T_CLOTH_ORTHO_WEIGHT : 0.05 # L_de
 
 INPUT:
   SIZE_TRAIN: [384, 192]
@@ -22,7 +24,7 @@ INPUT:
 DATASETS:
   NAMES: ('prcc')
   ROOT_DIR: '/root/autodl-tmp/CCReID/data'
-  LLAVA_JSON_PATH: '/root/autodl-tmp/CCReID/data/prcc_qwen2_final_labels.json' # 请替换为json所在路径
+  LLAVA_JSON_PATH: '/root/autodl-tmp/CCReID/data/prcc_qwen2_final_labels.json'
 
 DATALOADER:
   SAMPLER: 'softmax_triplet'
@@ -30,25 +32,17 @@ DATALOADER:
   NUM_WORKERS: 8
 
 SOLVER:
-  CHECKPOINT_PERIOD: 10
+  STAGE1_MAX_EPOCHS: 120
+  STAGE1_BASE_LR: 0.00035
+  STAGE2_MAX_EPOCHS: 40
+  STAGE2_BASE_LR: 0.000005
+  STAGE2_WARMUP_EPOCHS: 10
+  CHECKPOINT_PERIOD: 20
   IMS_PER_BATCH: 64
   OPTIMIZER_NAME: "AdamW"
-  BASE_LR: 0.000005
-  WARMUP_LR_INIT: 0.0000005
-  WARMUP_EPOCHS: 10
-  MAX_EPOCHS: 30 # 总轮次
-  STEPS: [20, 30] # 下降节点
-  GAMMA: 0.1 # 衰减倍率
-  WEIGHT_DECAY: 0.0001 
-  WEIGHT_DECAY_BIAS: 0.0001
+  STEPS: [20, 30]
+  GAMMA: 0.1
+  WARMUP_METHOD: 'linear'
   LARGE_FC_LR: True
 
-TEST:
-  EVALUATE_ONLY: 'False'
-  IMS_PER_BATCH: 128
-  RE_RANKING: 'False'
-  WEIGHT: ''
-  NECK_FEAT: 'before'
-  FEAT_NORM: 'yes'
-
-OUTPUT_DIR: './logs/exp1'
+OUTPUT_DIR: './logs/exp_two_stage'
