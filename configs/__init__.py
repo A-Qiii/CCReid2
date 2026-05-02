@@ -14,11 +14,21 @@ cfg.MODEL.STRIDE_SIZE = [16, 16]
 cfg.MODEL.SIE_CAMERA = False
 cfg.MODEL.SIE_VIEW = False
 cfg.MODEL.SIE_COE = 1.0
+
+# ==========================================================
+# 【两阶段架构核心参数 (Hybrid Prompting & MIPL)】
+# ==========================================================
+cfg.MODEL.TRAIN_STAGE = 1         # 核心开关：1 为混合提示学习，2 为视觉解耦微调
+cfg.MODEL.PROMPT_LENGTH = 4       # M=4，可学习提示词的长度
+cfg.MODEL.NUM_CLOTHES = 0         # 占位符，由 dataloader 动态计算后自动填入
+
+# --- 损失权重配置 (Stage 2 使用) ---
 cfg.MODEL.ID_LOSS_WEIGHT = 1.0
 cfg.MODEL.TRIPLET_LOSS_WEIGHT = 1.0
-cfg.MODEL.I2T_ID_WEIGHT = 1.0              # 更新默认值
-cfg.MODEL.I2T_CLOTH_GUIDE_WEIGHT = 0.5     # 注册拉近权重
-cfg.MODEL.I2T_CLOTH_ORTHO_WEIGHT = 0.05    # 注册排斥权重
+cfg.MODEL.I2T_ID_WEIGHT = 1.0           # 对应 L_Guide (身份语义锚点牵引)
+cfg.MODEL.I2T_CLOTH_SC_WEIGHT = 1.0     # 对应 L_sc (语义剥离校验/监督 cloth_proj)
+cfg.MODEL.I2T_CLOTH_ORTHO_WEIGHT = 0.05 # 对应 L_de (截断余弦正交/外科手术排斥)
+
 cfg.MODEL.NECK = 'bnneck'
 cfg.MODEL.NECK_FEAT = 'before'
 cfg.MODEL.COS_LAYER = False
@@ -41,8 +51,18 @@ cfg.DATALOADER.SAMPLER = 'softmax_triplet'
 cfg.DATALOADER.NUM_INSTANCE = 4
 cfg.DATALOADER.NUM_WORKERS = 8
 
-# --- SOLVER: 动力系统 (扁平化，切除 Stage2) ---
+# --- SOLVER: 动力系统 ---
 cfg.SOLVER = CN()
+
+# 【两阶段独立超参数】
+cfg.SOLVER.STAGE1_MAX_EPOCHS = 120
+cfg.SOLVER.STAGE1_BASE_LR = 3.5e-4
+
+cfg.SOLVER.STAGE2_MAX_EPOCHS = 40
+cfg.SOLVER.STAGE2_BASE_LR = 5e-6
+cfg.SOLVER.STAGE2_WARMUP_EPOCHS = 10
+
+# 基础设定兼容项 (会被 YML 和阶段代码覆盖)
 cfg.SOLVER.MAX_EPOCHS = 60
 cfg.SOLVER.CHECKPOINT_PERIOD = 20
 cfg.SOLVER.LOG_PERIOD = 50
@@ -51,11 +71,11 @@ cfg.SOLVER.BIAS_LR_FACTOR = 2.0
 cfg.SOLVER.SEED = 1234
 cfg.SOLVER.MARGIN = 0.3
 cfg.SOLVER.IMS_PER_BATCH = 64
-cfg.SOLVER.OPTIMIZER_NAME = "SGD"
+cfg.SOLVER.OPTIMIZER_NAME = "AdamW" # 推荐ViT使用AdamW
 cfg.SOLVER.BASE_LR = 0.00001
 cfg.SOLVER.WARMUP_LR_INIT = 0.000001
 cfg.SOLVER.WARMUP_EPOCHS = 5
-cfg.SOLVER.STEPS = [30, 50]
+cfg.SOLVER.STEPS = [20, 30]
 cfg.SOLVER.GAMMA = 0.1
 cfg.SOLVER.WARMUP_METHOD = 'linear'
 cfg.SOLVER.WARMUP_FACTOR = 0.01
@@ -75,7 +95,7 @@ cfg.TEST.FEAT_NORM = 'yes'
 
 # --- DATASETS: 数据源与文本挂载点 ---
 cfg.DATASETS = CN()
-cfg.DATASETS.NAMES = ('ltcc')
+cfg.DATASETS.NAMES = ('prcc')
 cfg.DATASETS.ROOT_DIR = ''
 cfg.DATASETS.LLAVA_JSON_PATH = ''  # 注入新工程的物理通路
 

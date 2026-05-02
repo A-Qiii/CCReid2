@@ -4,95 +4,102 @@ from .softmax_loss import CrossEntropyLabelSmooth
 from .triplet_loss import TripletLoss
 
 def make_loss(cfg, num_classes):
+    stage = cfg.MODEL.TRAIN_STAGE
+    
     if cfg.MODEL.IF_LABELSMOOTH == 'on':
         xent = CrossEntropyLabelSmooth(num_classes=num_classes)
     else:
         xent = F.cross_entropy
 
-    margin = getattr(cfg.SOLVER, 'MARGIN', 0.3)
-    triplet = TripletLoss(margin)
-
-    # ==========================================
-    # 【新增】：全局步数计数器，用于等距规律打印
-    # ==========================================
+    triplet = TripletLoss(getattr(cfg.SOLVER, 'MARGIN', 0.3))
+    
     global_iter_counter = 0
 
-    def loss_func(score, feat_list, target, txt_tuple=None):
-        nonlocal global_iter_counter # 声明使用外部的计数器
+    # 损失工厂：text_bank 仅在 Stage 2 由外部传入
+    def loss_func(score, feat_list, target, text_bank_id=None):
+        nonlocal global_iter_counter
         global_iter_counter += 1
 
-        # 1. 基础视觉分类损失
-        ID_LOSS = xent(score, target)
-
-        # 2. 三元组度量损失
-        global_feat = feat_list[0]
-        TRI_LOSS = triplet(global_feat, target)[0]
-        
-        # 解析特征
-        t_id = feat_list[1]
-        t_cloth = feat_list[2]
-        v_cloth_for_guide = feat_list[3]
-        v_cloth_for_ortho = feat_list[4]
-
-        # 3. 身份图文对齐损失：KL 散度软约束
-        B = global_feat.size(0)
-        v_norm = F.normalize(global_feat, p=2, dim=1)
-        t_id_norm = F.normalize(t_id, p=2, dim=1)
-        
-        sim_vis = torch.matmul(v_norm, v_norm.t())
-        sim_text = torch.matmul(t_id_norm, t_id_norm.t())
-        
-        tau = 0.05
-        sim_vis = sim_vis / tau
-        sim_text = sim_text / tau
-        
-        mask = torch.eye(B, dtype=torch.bool).to(global_feat.device)
-        sim_vis = sim_vis.masked_fill(mask, -10000.0)
-        sim_text = sim_text.masked_fill(mask, -10000.0)
-        
-        alpha = F.softmax(sim_text, dim=1)
-        log_beta = F.log_softmax(sim_vis, dim=1)
-        I2T_ID_LOSS = F.kl_div(log_beta, alpha, reduction='batchmean')
-
-        # 4. 彻底切断梯度泄漏的解耦排斥损失
-        v_cloth_guide_norm = F.normalize(v_cloth_for_guide, p=2, dim=1)
-        t_cloth_norm = F.normalize(t_cloth, p=2, dim=1)
-        cos_sim_cloth = torch.sum(v_cloth_guide_norm * t_cloth_norm, dim=1)
-        I2T_CLOTH_GUIDE_LOSS = 1.0 - torch.mean(cos_sim_cloth)
-
-        v_cloth_ortho_norm = F.normalize(v_cloth_for_ortho, p=2, dim=1)
-        cos_sim_ortho = torch.sum(v_norm * v_cloth_ortho_norm.detach(), dim=1) 
-        I2T_CLOTH_ORTHO_LOSS = torch.mean(F.relu(cos_sim_ortho))
-
         # ========================================================
-        # 5. 清爽版体检探针：每 100 个 Batch 精确打印一次
+        # 阶段一：仅优化提示词的 InfoNCE 对比损失
         # ========================================================
-        if global_iter_counter % 100 == 0: 
-            v_cloth_std = v_cloth_for_guide.std(dim=0).mean().item()
-            avg_guide_sim = torch.mean(cos_sim_cloth).item()
-            avg_ortho_sim = torch.mean(cos_sim_ortho).item()
+        if stage == 1:
+            global_feat, t_id, t_cloth = feat_list
             
-            print(f"\n[Iter {global_iter_counter}] 深度特征体检探针 ====")
-            print(f"-> 投影特征绝对标准差 (跌破0.01即坍塌): {v_cloth_std:.5f}")
-            print(f"-> 视觉与文本相似度 (Guide): {avg_guide_sim:.4f}")
-            print(f"-> 骨干与投影相似度 (Ortho): {avg_ortho_sim:.4f}")
-            print(f"-> ID: {ID_LOSS.item():.3f} | TRI: {TRI_LOSS.item():.3f} | KL: {I2T_ID_LOSS.item():.3f}")
-            print(f"========================================\n")
+            # L2 归一化
+            v_norm = F.normalize(global_feat, p=2, dim=1)
+            t_id_norm = F.normalize(t_id, p=2, dim=1)
+            t_cloth_norm = F.normalize(t_cloth, p=2, dim=1)
+            
+            logit_scale = 100.0 # 经验缩放系数
+            
+            # ID 对比
+            logits_i2t_id = logit_scale * v_norm @ t_id_norm.t()
+            logits_t2i_id = logit_scale * t_id_norm @ v_norm.t()
+            loss_i2t_id = xent(logits_i2t_id, target)
+            loss_t2i_id = xent(logits_t2i_id, target)
+            
+            # Cloth 对比 (仅为了拉伸空间，目标依然用 identity target，因为同人衣服一致)
+            logits_i2t_cloth = logit_scale * v_norm @ t_cloth_norm.t()
+            logits_t2i_cloth = logit_scale * t_cloth_norm @ v_norm.t()
+            loss_i2t_cloth = xent(logits_i2t_cloth, target)
+            loss_t2i_cloth = xent(logits_t2i_cloth, target)
+            
+            total_loss = loss_i2t_id + loss_t2i_id + loss_i2t_cloth + loss_t2i_cloth
+            
+            if global_iter_counter % 100 == 0:
+                print(f"[Stage 1] InfoNCE Loss: {total_loss.item():.4f}")
+                
+            return total_loss, None
 
-        # 6. 动态合成总损失
-        w_base_id = getattr(cfg.MODEL, 'ID_LOSS_WEIGHT', 1.0)
-        w_base_tri = getattr(cfg.MODEL, 'TRIPLET_LOSS_WEIGHT', 1.0)
-        w_i2t_id = getattr(cfg.MODEL, 'I2T_CLOTH_GUIDE_WEIGHT', 0.5)
-        w_i2t_guide = getattr(cfg.MODEL, 'I2T_CLOTH_WEIGHT', 0.5)
-        w_i2t_ortho = getattr(cfg.MODEL, 'I2T_CLOTH_ORTHO_WEIGHT', 0.05)
-
-
-        total_loss = w_base_id * ID_LOSS + \
-                     w_base_tri * TRI_LOSS + \
-                     w_i2t_id * I2T_ID_LOSS + \
-                     w_i2t_guide * I2T_CLOTH_GUIDE_LOSS + \
-                     w_i2t_ortho * I2T_CLOTH_ORTHO_LOSS
-        
-        return total_loss, None
+        # ========================================================
+        # 阶段二：MIPL 外科手术解耦与视觉微调
+        # ========================================================
+        elif stage == 2:
+            global_feat, f_img2clo, t_cloth_gt = feat_list
+            
+            # 1. 基础度量
+            L_ce = xent(score, target)
+            L_tri = triplet(global_feat, target)[0]
+            
+            # 2. 全局身份语义牵引 (L_Guide) - 解决“局部挣扎”问题
+            if text_bank_id is None:
+                raise ValueError("Stage 2 必须传入全局固化的 text_bank_id！")
+            
+            v_norm = F.normalize(global_feat, p=2, dim=1)
+            t_id_bank_norm = F.normalize(text_bank_id, p=2, dim=1)
+            
+            logits_guide = 100.0 * v_norm @ t_id_bank_norm.t() # [Batch, num_classes]
+            L_Guide = xent(logits_guide, target)
+            
+            # 3. 语义剥离校验 (L_sc) - 仅监督投影矩阵
+            f_img2clo_norm = F.normalize(f_img2clo, p=2, dim=1)
+            t_cloth_gt_norm = F.normalize(t_cloth_gt, p=2, dim=1)
+            # 使用 MSE 保证特征空间的一致性
+            L_sc = F.mse_loss(f_img2clo_norm, t_cloth_gt_norm) * 10.0 
+            
+            # 4. 截断余弦正交切除 (L_de) - 价值千金的防爆盾
+            # 【绝对核心：.detach() 保护了 f_img2clo，迫使 ViT 脱衣服】
+            cos_sim_ortho = torch.sum(v_norm * f_img2clo_norm.detach(), dim=1)
+            L_de = torch.mean(F.relu(cos_sim_ortho))
+            
+            # 5. 合成总损失
+            w_id = cfg.MODEL.ID_LOSS_WEIGHT
+            w_tri = cfg.MODEL.TRIPLET_LOSS_WEIGHT
+            w_guide = cfg.MODEL.I2T_ID_WEIGHT
+            w_sc = cfg.MODEL.I2T_CLOTH_SC_WEIGHT
+            w_ortho = cfg.MODEL.I2T_CLOTH_ORTHO_WEIGHT
+            
+            total_loss = w_id * L_ce + w_tri * L_tri + w_guide * L_Guide + w_sc * L_sc + w_ortho * L_de
+            
+            # 体检探针
+            if global_iter_counter % 100 == 0:
+                print(f"\n[Stage 2] === MIPL 手术刀体检探针 ===")
+                print(f"-> 语义剥离校验 MSE (L_sc): {L_sc.item():.4f}")
+                print(f"-> 正交切除强度 (L_de, Max=1): {L_de.item():.4f}")
+                print(f"-> 基础[CE:{L_ce.item():.3f} TRI:{L_tri.item():.3f}] | 引导[Guide:{L_Guide.item():.3f}]")
+                print(f"=======================================\n")
+                
+            return total_loss, None
 
     return loss_func

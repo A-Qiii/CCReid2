@@ -1,14 +1,15 @@
 import os
 import argparse
+import torch
 import random
 import numpy as np
-import torch
 from configs import cfg
 from datasets import make_dataloader
 from modeling import make_model
 from loss import make_loss
-from processor.processor import do_train
-from solver import make_optimizer, build_lr_scheduler
+from solver import make_optimizer
+from solver.lr_scheduler import WarmupMultiStepLR
+from processor.processor import do_train_stage1, extract_text_bank, do_train_stage2
 
 def set_seed(seed):
     torch.manual_seed(seed)
@@ -20,58 +21,78 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = True
 
 def train(cfg):
-    # 1. 加载数据
+    set_seed(cfg.SOLVER.SEED)
+
+    # 1. 准备数据流
+    # (假设你的 make_dataloader 返回以下 7 个对象)
     train_loader, train_loader_normal, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
 
-    # 2. 模型初始化
-    model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
-    model.to('cuda')
-
-    # --- 断点续训逻辑：检测 model_40.pth ---
-    checkpoint_path = os.path.join(cfg.OUTPUT_DIR, "model_40.pth")
-    start_epoch = 0
-    if os.path.exists(checkpoint_path):
-        print(f">>> 发现断点权重，正在加载第 40 轮模型: {checkpoint_path}")
-        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
-        start_epoch = 40
+    # 动态获取总衣服种类数给网络
+    dataset_obj = train_loader.dataset.dataset
+    if hasattr(dataset_obj, 'num_train_clothes'):
+        num_clothes = dataset_obj.num_train_clothes
     else:
-        print(">>> 未发现断点权重，将从第 1 轮开始训练。")
-    # -----------------------------------
+        num_clothes = 1000 # 兜底机制
 
-    # 3. 损失函数
-    loss_func = make_loss(cfg, num_classes=num_classes)
+    cfg.defrost()
+    cfg.MODEL.NUM_CLOTHES = num_clothes
+    cfg.freeze()
 
-    # 4. 优化器与调度器
-    optimizer = make_optimizer(cfg, model)
-    scheduler = build_lr_scheduler(cfg, optimizer)
+    print(f"数据总线接通 -> 全局分类数(ID): {num_classes}, 探测到全局衣服数(Cloth): {cfg.MODEL.NUM_CLOTHES}")
 
-    # 5. 启动训练，传入 start_epoch
-    do_train(
-        cfg,
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        scheduler,
-        loss_func,
-        num_query,
-        start_epoch=start_epoch
-    )
+    # =====================================================================
+    # 【STAGE 1】：混合提示学习 (Hybrid Prompting)
+    # =====================================================================
+    print("\n" + "="*70)
+    print("🚀 [STAGE 1 启动]：对比学习构建细粒度语义锚点")
+    print("="*70)
+    cfg.defrost(); cfg.MODEL.TRAIN_STAGE = 1; cfg.freeze()
+
+    model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
+    model.to(cfg.MODEL.DEVICE)
+
+    loss_func_s1 = make_loss(cfg, num_classes=num_classes)
+    optimizer_s1 = make_optimizer(cfg, model)
+    scheduler_s1 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_s1, T_max=cfg.SOLVER.STAGE1_MAX_EPOCHS)
+
+    do_train_stage1(cfg, model, train_loader, optimizer_s1, scheduler_s1, loss_func_s1)
+
+    # =====================================================================
+    # 【BRIDGE】：提取并固化记忆银行 (Text Feature Bank)
+    # =====================================================================
+    print("\n" + "="*70)
+    print("🌉 [阶段交接]：固化 Prompt 并提取全局 Text Bank")
+    print("="*70)
+    text_bank_id = extract_text_bank(cfg, model, train_loader)
+
+    # =====================================================================
+    # 【STAGE 2】：MIPL 视觉特征解耦与微调
+    # =====================================================================
+    print("\n" + "="*70)
+    print("🚀 [STAGE 2 启动]：全局引导与截断正交的联合解耦手术")
+    print("="*70)
+    cfg.defrost(); cfg.MODEL.TRAIN_STAGE = 2; cfg.freeze()
+
+    # 触发 Stage 2 极其严格的梯度冻结/解冻规则 (锁定 Text 侧，放开 ViT 和 Proj)
+    model._freeze_parameters_by_stage()
+
+    loss_func_s2 = make_loss(cfg, num_classes=num_classes)
+    optimizer_s2 = make_optimizer(cfg, model)
+    scheduler_s2 = WarmupMultiStepLR(optimizer_s2, cfg.SOLVER.STEPS, cfg.SOLVER.GAMMA,
+                                     cfg.SOLVER.WARMUP_FACTOR, cfg.SOLVER.STAGE2_WARMUP_EPOCHS, cfg.SOLVER.WARMUP_METHOD)
+
+    do_train_stage2(cfg, model, train_loader, val_loader, optimizer_s2, scheduler_s2, loss_func_s2, num_query, text_bank_id)
+    
+    print("\n🎉 CC-ReID 两阶段联合训练圆满结束！")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="CC-ReID Training")
-    parser.add_argument("--config_file", default="", help="path to config file", type=str)
-    parser.add_argument("opts", help="Modify config options", default=None, nargs=argparse.REMAINDER)
-
+    parser = argparse.ArgumentParser(description="CC-ReID Hybrid Two-Stage Training")
+    parser.add_argument("--config_file", default="configs/prcc/vit_ccreid_prcc.yml", help="path to config file", type=str)
     args = parser.parse_args()
+
     if args.config_file != "":
         cfg.merge_from_file(args.config_file)
-    cfg.merge_from_list(args.opts)
+    cfg.freeze()
 
-    seed = getattr(cfg.SOLVER, 'SEED', 1234)
-    set_seed(seed)
-
-    if not os.path.exists(cfg.OUTPUT_DIR):
-        os.makedirs(cfg.OUTPUT_DIR)
-
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     train(cfg)
