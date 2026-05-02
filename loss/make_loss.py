@@ -82,14 +82,16 @@ def make_loss(cfg, num_classes):
         # 6. 动态合成总损失
         w_base_id = getattr(cfg.MODEL, 'ID_LOSS_WEIGHT', 1.0)
         w_base_tri = getattr(cfg.MODEL, 'TRIPLET_LOSS_WEIGHT', 1.0)
-        w_i2t_id = getattr(cfg.MODEL, 'I2T_ID_WEIGHT', 2.0) 
-        w_i2t_cloth = getattr(cfg.MODEL, 'I2T_CLOTH_WEIGHT', 0.5)
+        w_i2t_id = getattr(cfg.MODEL, 'I2T_CLOTH_GUIDE_WEIGHT', 0.5)
+        w_i2t_guide = getattr(cfg.MODEL, 'I2T_CLOTH_WEIGHT', 0.5)
+        w_i2t_ortho = getattr(cfg.MODEL, 'I2T_CLOTH_ORTHO_WEIGHT', 0.05)
+
 
         total_loss = w_base_id * ID_LOSS + \
                      w_base_tri * TRI_LOSS + \
                      w_i2t_id * I2T_ID_LOSS + \
-                     w_i2t_cloth * I2T_CLOTH_GUIDE_LOSS + \
-                     w_i2t_cloth * I2T_CLOTH_ORTHO_LOSS
+                     w_i2t_guide * I2T_CLOTH_GUIDE_LOSS + \
+                     w_i2t_ortho * I2T_CLOTH_ORTHO_LOSS
         
         return total_loss, None
 

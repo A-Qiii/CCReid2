@@ -14,8 +14,8 @@ def test(cfg):
     _, _, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
     
-    # 挂载 60 轮物理权重
-    weight_path = os.path.join(cfg.OUTPUT_DIR, "model_40.pth")
+    # 挂载 30 轮物理权重
+    weight_path = os.path.join(cfg.OUTPUT_DIR, "model_20.pth")
     if not os.path.exists(weight_path):
         raise FileNotFoundError(f"找不到物理权重文件: {weight_path}")
     print(f">>> 成功挂载权重: {weight_path}")
