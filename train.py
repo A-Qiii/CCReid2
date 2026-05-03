@@ -73,7 +73,8 @@ def train(cfg):
     print("="*70)
     cfg.defrost(); cfg.MODEL.TRAIN_STAGE = 2; cfg.freeze()
 
-    # 触发 Stage 2 极其严格的梯度冻结/解冻规则 (锁定 Text 侧，放开 ViT 和 Proj)
+    # 同步 model 内部 stage 状态，再触发冻结/解冻
+    model.stage = 2
     model._freeze_parameters_by_stage()
 
     loss_func_s2 = make_loss(cfg, num_classes=num_classes)

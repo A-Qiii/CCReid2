@@ -86,6 +86,15 @@ class PRCC(object):
             # 严格打包为 6 元组
             self.train.append((normalized_path, mapped_pid, camid, cloth_id, id_text, cloth_text))
 
+        # 步骤 1.4: 将稀疏 cloth_id（0,2,4...）重映射为连续整数（0,1,2...）
+        # 原因：ctx_cloth 大小 = num_train_clothes（唯一数量），但稀疏 cloth_id 最大值远超此数
+        all_cloth_ids = sorted(set(item[3] for item in self.train))
+        cloth2label = {cid: i for i, cid in enumerate(all_cloth_ids)}
+        self.train = [
+            (item[0], item[1], item[2], cloth2label[item[3]], item[4], item[5])
+            for item in self.train
+        ]
+
         # ==========================================================
         # 2. 测试集解析 (保持原始 PID，用于距离度量算法)
         # ==========================================================

@@ -114,19 +114,25 @@ class build_transformer(nn.Module):
     def _freeze_parameters_by_stage(self):
         """核心：根据阶段严格控制梯度"""
         if self.stage == 1:
-            # Stage 1: 冻结视觉骨干和文本骨干，仅放开 Prompt
-            for param in self.image_encoder.parameters(): param.requires_grad = False
-            for param in self.clip_model.transformer.parameters(): param.requires_grad = False
+            # Stage 1: 冻结 clip_model 全部参数（含 token_embedding/positional_embedding/ln_final/text_projection）
+            # 同时冻结 Stage 2 专属层，仅放开可学习 Prompt 向量
+            for param in self.clip_model.parameters(): param.requires_grad = False
+            for param in self.classifier.parameters(): param.requires_grad = False
+            for param in self.bottleneck.parameters(): param.requires_grad = False
+            for param in self.cloth_proj.parameters(): param.requires_grad = False
             self.prompt_learner.ctx_id.requires_grad = True
             self.prompt_learner.ctx_cloth.requires_grad = True
-            
+
         elif self.stage == 2:
-            # Stage 2: 冻结文本端和Prompt，放开视觉骨干和投影层
-            for param in self.image_encoder.parameters(): param.requires_grad = True
-            for param in self.clip_model.transformer.parameters(): param.requires_grad = False
+            # Stage 2: 冻结 clip_model 全部参数（完整锁死文本侧），放开视觉骨干和各投影/分类层
+            for param in self.clip_model.parameters(): param.requires_grad = False
             self.prompt_learner.ctx_id.requires_grad = False
             self.prompt_learner.ctx_cloth.requires_grad = False
+            # image_encoder 是 clip_model.visual 的引用，单独解冻视觉参数
+            for param in self.image_encoder.parameters(): param.requires_grad = True
             for param in self.cloth_proj.parameters(): param.requires_grad = True
+            for param in self.classifier.parameters(): param.requires_grad = True
+            for param in self.bottleneck.parameters(): param.requires_grad = True
 
     def text_encoder_forward(self, prompts, tokenized_prompts):
         x = prompts + self.clip_model.positional_embedding.type(self.clip_model.dtype)
