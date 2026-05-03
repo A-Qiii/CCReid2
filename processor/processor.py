@@ -4,6 +4,7 @@ import time
 import datetime
 import numpy as np
 from torch.cuda import amp
+from torch.utils.tensorboard import SummaryWriter
 
 def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
     device = cfg.MODEL.DEVICE
@@ -11,6 +12,10 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
     epochs = cfg.SOLVER.STAGE1_MAX_EPOCHS
     log_period = getattr(cfg.SOLVER, 'LOG_PERIOD', 50)
     scaler = amp.GradScaler()
+
+    # 初始化 TensorBoard
+    tb_dir = os.path.join(cfg.OUTPUT_DIR, "tensorboard", "stage1")
+    tb_writer = SummaryWriter(log_dir=tb_dir)
 
     print(f">>> [Stage 1] 启动混合提示学习循环 (InfoNCE)，共 {epochs} Epochs...")
 
@@ -25,7 +30,6 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
 
             with amp.autocast():
                 feat_list = model(x=img, label=target, cloth_label=cloth_id, id_text=id_text, cloth_text=cloth_text)
-                # 【修改点】：将 cloth_id 传给 loss_fn 的 target_cloth 变量
                 loss, _ = loss_fn(None, feat_list, target, target_cloth=cloth_id)
 
             scaler.scale(loss).backward()
@@ -35,6 +39,10 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
 
             if n_iter % log_period == 0:
                 print(f"Stage 1 Epoch[{epoch}] Iter[{n_iter}/{len(train_loader)}] InfoNCE Loss: {loss.item():.4f}")
+                
+                # 将数据写入 TensorBoard
+                global_step = (epoch - 1) * len(train_loader) + n_iter
+                tb_writer.add_scalar("Train/Stage1_Loss", loss.item(), global_step)
 
         scheduler.step()
 
@@ -44,8 +52,10 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
             torch.save(model.state_dict(), save_path)
             print(f">>> [Stage 1] Prompt 权重已保存至: {save_path}")
 
+    tb_writer.close()
+
 def extract_text_bank(cfg, model, train_loader):
-    """【物理桥梁】：提取全局文本锚点矩阵，解决跨 Batch 全集牵引问题"""
+    """提取全局文本锚点矩阵"""
     device = cfg.MODEL.DEVICE
     model.eval()
     print(f">>> 正在提取全局文本特征 Bank...")
@@ -82,6 +92,10 @@ def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler, 
     log_period = getattr(cfg.SOLVER, 'LOG_PERIOD', 50)
     scaler = amp.GradScaler()
 
+    # 初始化 TensorBoard
+    tb_dir = os.path.join(cfg.OUTPUT_DIR, "tensorboard", "stage2")
+    tb_writer = SummaryWriter(log_dir=tb_dir)
+
     print(f">>> [Stage 2] 启动 MIPL 视觉特征解耦微调，共 {epochs} Epochs...")
 
     for epoch in range(1, epochs + 1):
@@ -105,6 +119,11 @@ def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler, 
             if n_iter % log_period == 0:
                 acc = (cls_score.max(1)[1] == target).float().mean()
                 print(f"Stage 2 Epoch[{epoch}] Iter[{n_iter}/{len(train_loader)}] Total Loss: {loss.item():.4f} | Base Acc: {acc.item():.3f}")
+                
+                # 将数据写入 TensorBoard
+                global_step = (epoch - 1) * len(train_loader) + n_iter
+                tb_writer.add_scalar("Train/Stage2_TotalLoss", loss.item(), global_step)
+                tb_writer.add_scalar("Train/Stage2_BaseAcc", acc.item(), global_step)
 
         scheduler.step()
 
@@ -113,6 +132,8 @@ def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler, 
             save_path = os.path.join(cfg.OUTPUT_DIR, f"stage2_disentangled_model_{epoch}.pth")
             torch.save(model.state_dict(), save_path)
             print(f">>> [Stage 2] 最终解耦权重已保存至: {save_path}")
+
+    tb_writer.close()
 
 def do_inference(cfg, model, val_loader, num_query):
     device = cfg.MODEL.DEVICE
