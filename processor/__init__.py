@@ -1,1 +1,1 @@
-from .processor import do_train, do_inference
+from .processor import do_train_stage1, extract_text_bank, do_train_stage2, do_inference

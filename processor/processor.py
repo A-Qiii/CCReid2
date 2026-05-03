@@ -20,13 +20,13 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
             img = batch[0].to(device)
             target = batch[1].to(device)
             cloth_id = batch[3].to(device)
-            id_text = batch[4]
-            cloth_text = batch[5]
+            id_text = batch[5]   
+            cloth_text = batch[6]
 
             with amp.autocast():
-                # 阶段一模型仅返回 [global_feat, t_id, t_cloth]
                 feat_list = model(x=img, label=target, cloth_label=cloth_id, id_text=id_text, cloth_text=cloth_text)
-                loss, _ = loss_fn(None, feat_list, target)
+                # 【修改点】：将 cloth_id 传给 loss_fn 的 target_cloth 变量
+                loss, _ = loss_fn(None, feat_list, target, target_cloth=cloth_id)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -38,7 +38,6 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
 
         scheduler.step()
 
-        # 保存阶段一固化权重
         if epoch % cfg.SOLVER.CHECKPOINT_PERIOD == 0 or epoch == epochs:
             os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
             save_path = os.path.join(cfg.OUTPUT_DIR, f"stage1_prompt_model_{epoch}.pth")
@@ -51,7 +50,6 @@ def extract_text_bank(cfg, model, train_loader):
     model.eval()
     print(f">>> 正在提取全局文本特征 Bank...")
 
-    # 直接遍历底层 dataset 获取所有全集数据（无视采样器截断）
     dataset_list = train_loader.dataset.dataset.train 
     id_texts = {}
     
@@ -64,19 +62,18 @@ def extract_text_bank(cfg, model, train_loader):
     num_classes = len(id_texts)
     bank_id = torch.zeros(num_classes, 512).to(device)
 
-    # 冻结状态下提取纯净文本锚点
     with torch.no_grad():
         for pid, text in id_texts.items():
             p_id, _, tk_id, _ = model.prompt_learner(
                 torch.tensor([pid]).to(device),
-                torch.tensor([0]).to(device), # cloth 占位符，不影响 id
+                torch.tensor([0]).to(device), 
                 [text], [""]
             )
             t_id = model.text_encoder_forward(p_id, tk_id)
             bank_id[pid] = t_id.squeeze(0)
 
     print(f">>> 全局身份文本 Bank 提取完毕，矩阵形状: {bank_id.shape}")
-    return bank_id.detach() # 绝对静止的金标准锚点
+    return bank_id.detach() 
 
 def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn, num_query, text_bank_id):
     device = cfg.MODEL.DEVICE
@@ -93,14 +90,11 @@ def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler, 
             img = batch[0].to(device)
             target = batch[1].to(device)
             cloth_id = batch[3].to(device)
-            id_text = batch[4]
-            cloth_text = batch[5]
+            id_text = batch[5]   
+            cloth_text = batch[6]
 
             with amp.autocast():
-                # 阶段二模型返回分类 score, 以及用于 MIPL 解耦的特征列表
                 cls_score, feat_list = model(x=img, label=target, cloth_label=cloth_id, id_text=id_text, cloth_text=cloth_text)
-                
-                # 【核心】：将全局 Text Bank 传入 Loss 用于 L_Guide 引导
                 loss, _ = loss_fn(cls_score, feat_list, target, text_bank_id=text_bank_id)
 
             scaler.scale(loss).backward()
@@ -129,7 +123,7 @@ def do_inference(cfg, model, val_loader, num_query):
             img = batch[0].to(device)
             pid = batch[1]
             camid = batch[2]
-            feat = model(x=img) # 测试时仅走图像编码器提取骨干特征
+            feat = model(x=img) 
             feats.append(feat.cpu())
             pids.extend(np.asarray(pid))
             camids.extend(np.asarray(camid))

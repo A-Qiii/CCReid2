@@ -60,5 +60,4 @@ def make_dataloader(cfg):
         collate_fn=None
     )
 
-    return train_loader, train_loader, val_loader, len(
-        dataset.query), dataset.num_train_pids, dataset.num_train_cams, dataset.num_train_vids
+    return train_loader, train_loader, val_loader, len(dataset.query), dataset.num_train_pids, dataset.num_train_cams, 0
