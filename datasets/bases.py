@@ -36,31 +36,19 @@ class ImageDataset(Dataset):
         if self.transform is not None:
             img = self.transform(img)
 
-        # 文本拼接逻辑
+        # -------------------------------------------------------
+        # 文本读取：统一使用 identity_features / clothing_features
+        # JSON 主键优先尝试 "pid文件夹/文件名" (PRCC格式)，
+        # 兜底尝试纯文件名 (LTCC格式)，最终兜底用空字典
+        # -------------------------------------------------------
         img_name = os.path.basename(img_path)
         parent_dir = os.path.basename(os.path.dirname(img_path))
         prcc_key = f"{parent_dir}/{img_name}"
+
         info = self.llava_dict.get(prcc_key, self.llava_dict.get(img_name, {}))
 
-        # 1. 组装身份长句 (Gender + Body Shape)
-        gender = info.get("gender", "person")
-        body = info.get("body_shape", "normal")
-        id_text = f"A photo of a {gender} with {body} body shape."
-
-        # 2. 组装衣着长句 (Upper + Lower + Shoes + Bag)
-        u, l, s, b = info.get("upper_garment", "None"), info.get("lower_garment", "None"), \
-                     info.get("shoes", "None"), info.get("backpack", "None")
-        
-        cloth_parts = []
-        if u != "None": cloth_parts.append(f"wearing {u}")
-        if l != "None": cloth_parts.append(f"wearing {l}")
-        if s != "None": cloth_parts.append(f"wearing {s}")
-        if b != "None": cloth_parts.append(f"carrying {b}")
-        
-        if cloth_parts:
-            cloth_text = "A photo of a person " + ", ".join(cloth_parts) + "."
-        else:
-            cloth_text = "A photo of a person."
+        id_text   = info.get("identity_features",  "a person")
+        cloth_text = info.get("clothing_features", "clothes")
 
         # 恢复 I/O 契约：返回 7 个元素
         return img, pid, camid, cloth_id, 0, id_text, cloth_text

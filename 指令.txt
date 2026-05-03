@@ -9,6 +9,7 @@ python test_prcc.py --config_file configs/prcc/vit_ccreid_prcc.yml
 github账号密码
 3218820029@qq.com
 dmq20040723
+git push github 
 
 gitee账号密码
 15269353633
