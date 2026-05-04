@@ -1,0 +1,76 @@
+# ============================================================
+# 预实验配置文件（Pilot Experiment）
+# 用途：快速验证超参数合理性，节省时间和算力
+# 使用方法：python train.py --config_file configs/prcc/vit_ccreid_prcc_pilot.yml
+# ============================================================
+
+MODEL:
+  PRETRAIN_CHOICE: 'imagenet'
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'on'
+  IF_WITH_CENTER: 'no'
+  NAME: 'ViT-B-16'
+  STRIDE_SIZE: [16, 16]
+  TRAIN_STAGE: 1
+  PROMPT_LENGTH: 4
+
+  # 损失权重（Stage 2）
+  ID_LOSS_WEIGHT: 1.0
+  TRIPLET_LOSS_WEIGHT: 1.0
+  I2T_ID_WEIGHT: 1.0
+  I2T_CLOTH_SC_WEIGHT: 1.0
+  I2T_CLOTH_ORTHO_WEIGHT: 0.1   # 预实验先用默认值
+
+INPUT:
+  SIZE_TRAIN: [384, 192]
+  SIZE_TEST: [384, 192]
+  PROB: 0.5
+  RE_PROB: 0.7
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+
+DATASETS:
+  NAMES: 'prcc'
+  ROOT_DIR: '/root/autodl-tmp/CCReID/data'
+  LLAVA_JSON_PATH: '/root/autodl-tmp/CCReID/data/prcc_qwen2_final_labels.json'
+
+DATALOADER:
+  SAMPLER: 'softmax_triplet'
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+SOLVER:
+  # ---- Stage 1 预实验：30轮，约为正式训练的1/4 ----
+  STAGE1_MAX_EPOCHS: 30
+  STAGE1_BASE_LR: 0.00035      # 【关键超参】预实验A组在这里改
+
+  # ---- Stage 2 预实验：10轮，约为正式训练的1/4 ----
+  STAGE2_MAX_EPOCHS: 10
+  STAGE2_BASE_LR: 0.000005
+  STAGE2_WARMUP_EPOCHS: 3      # 按比例缩减
+
+  # ---- 通用设置 ----
+  CHECKPOINT_PERIOD: 10        # 每10轮存一次（预实验轮次少，多存几个）
+  LOG_PERIOD: 20               # 每20个iter打印一次（比正式训练更密集）
+  IMS_PER_BATCH: 64
+  OPTIMIZER_NAME: "AdamW"
+  STEPS: [6, 8]                # Stage2 的LR衰减节点（按10轮等比缩放）
+  GAMMA: 0.1
+  WARMUP_METHOD: 'linear'
+  WARMUP_FACTOR: 0.01
+  WEIGHT_DECAY: 0.0005
+  WEIGHT_DECAY_BIAS: 0.0001
+  LARGE_FC_LR: True
+  SEED: 1234
+  MARGIN: 0.3
+
+TEST:
+  EVALUATE_ONLY: 'False'
+  IMS_PER_BATCH: 128
+  RE_RANKING: 'False'
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+# 预实验输出目录，与正式实验分开
+OUTPUT_DIR: './logs/pilot_B1'

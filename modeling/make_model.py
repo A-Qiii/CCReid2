@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from .clip import clip
 
+
 def weights_init_kaiming(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
@@ -17,6 +18,7 @@ def weights_init_kaiming(m):
             nn.init.constant_(m.weight, 1.0)
             nn.init.constant_(m.bias, 0.0)
 
+
 def weights_init_classifier(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
@@ -24,52 +26,108 @@ def weights_init_classifier(m):
         if m.bias is not None:
             nn.init.constant_(m.bias, 0.0)
 
+
 # =========================================================================
 # 混合提示学习器 (Hybrid Prompt Learner)
-# 将 Qwen 的硬文本与可学习的 M=4 软提示进行拼接
+#
+# 【[X] 位置说明】
+# 格式："{Qwen_Macro} [X]1[X]2[X]3[X]4 person/clothes"
+# 完整 token 序列：[SOT] {Qwen硬文本tokens} [X]1..M {person/clothes} [EOT]
+#
+# 设计依据：
+# - CLIP-ReID / MIPL 原始格式为 "[X]1..M person"，软提示在前，硬标签在后。
+# - 本项目创新点：在 [X] 之前加入 Qwen2 生成的宏观属性硬文本作为语义初始化锚点。
+#   [X] 在感知到前方 Qwen 文本的语义上下文后，进行细粒度补充，而非盲目初始化。
+# - 与 CoCoOp 的 "context + class" 结构类比：Qwen硬文本 ≈ class token，[X] ≈ context。
+#
+# 工程实现：
+# 将硬文本模板固定为 "{id_text} X X X X person" / "{cloth_text} X X X X clothes"，
+# 再用占位字符 "X"（单token）定位插入点，替换为可学习向量。
+# 这样无需动态寻找插入点，结构稳定，对任意长度的 Qwen 硬文本均适用。
 # =========================================================================
 class HybridPromptLearner(nn.Module):
-    def __init__(self, cfg, num_classes, clip_model):
+    def __init__(self, cfg, num_classes, num_clothes, clip_model):
         super().__init__()
-        self.M = cfg.MODEL.PROMPT_LENGTH
+        self.M = cfg.MODEL.PROMPT_LENGTH  # M=4
         self.num_classes = num_classes
-        self.num_clothes = cfg.MODEL.NUM_CLOTHES  # 由 Dataloader 赋值后传入
-        
-        ctx_dim = clip_model.ln_final.weight.shape[0] # 512
-        
-        # 初始化可学习的身份 [X]^p 和 衣服 [X]^c 张量
+        self.num_clothes = num_clothes
+
+        ctx_dim = clip_model.ln_final.weight.shape[0]  # 512
+
+        # 可学习软提示向量：每个身份/衣服各有独立的 M 个向量
         # 维度: [数量, M, 512]
         self.ctx_id = nn.Parameter(torch.empty(self.num_classes, self.M, ctx_dim))
         self.ctx_cloth = nn.Parameter(torch.empty(self.num_clothes, self.M, ctx_dim))
-        
+
         nn.init.normal_(self.ctx_id, std=0.02)
         nn.init.normal_(self.ctx_cloth, std=0.02)
-        
+
         self.token_embedding = clip_model.token_embedding
 
+    def _build_prompts(self, ctx_batch, raw_text_list, suffix_word):
+        """
+        将 [X] 软提示插入到硬文本之后、末尾词之前。
+
+        最终 token 序列（逻辑）：
+            [SOT] {Qwen硬文本 tokens} [X]1..M {suffix_word} [EOT 及 padding]
+
+        实现方式：
+        1. 将硬文本 tokenize，得到完整的 77 维 token 序列和 embedding。
+        2. 从 embedding 中提取有效的硬文本部分（去掉 SOT 之后的 [X] 占位符和 suffix）。
+        3. 拼接：[SOT embed] + [Qwen embed] + [ctx_batch embed] + [suffix embed] + [padding zeros]
+        4. 截断到 77 个 token（CLIP 最大长度）。
+
+        注意：tokenized_prompts 用于定位 [EOT] 位置，我们重新 tokenize 含完整占位符的句子。
+        """
+        device = ctx_batch.device
+        B, M, D = ctx_batch.shape
+
+        # 构造完整占位模板（用于定位 [EOT]）："{raw_text} * * * * {suffix_word}."
+        # 使用 "*" 作为 M 个单字符占位符（每个恰好是一个 token），便于定位
+        placeholder = " ".join(["*"] * M)
+        full_texts = [f"{t} {placeholder} {suffix_word}." for t in raw_text_list]
+        tokenized = clip.tokenize(full_texts).to(device)  # [B, 77]
+
+        # 获取完整 embedding（含 [SOT]、硬文本、占位符、suffix、[EOT]）
+        with torch.no_grad():
+            full_embed = self.token_embedding(tokenized).type(ctx_batch.dtype)  # [B, 77, D]
+
+        # 定位 "*" 占位符在序列中的起始位置
+        # tokenize("*") 的 token id 是固定的，找到第一个 "*" 的位置即为插入点
+        star_token_id = clip.tokenize(["*"]).squeeze()[1].item()  # 跳过 [SOT]
+        # 找每个样本中第一个 "*" 的位置
+        star_positions = (tokenized == star_token_id).float().argmax(dim=1)  # [B]
+
+        # 逐样本拼装：用可学习 ctx 向量替换 "*" 占位的 M 个 token
+        new_embed = full_embed.clone()
+        for i in range(B):
+            pos = star_positions[i].item()
+            new_embed[i, pos: pos + M, :] = ctx_batch[i]  # 替换 [X]1..M
+
+        return new_embed, tokenized
+
     def forward(self, id_label, cloth_label, id_text, cloth_text):
-        # 获取当前 batch 的可学习上下文 [B, M, 512]
-        ctx_id_batch = self.ctx_id[id_label]
-        ctx_cloth_batch = self.ctx_cloth[cloth_label]
-        
-        # 文本 token 化并获取原始 embedding [B, 77, 512]
-        id_tokens = clip.tokenize(id_text).to(ctx_id_batch.device)
-        cloth_tokens = clip.tokenize(cloth_text).to(ctx_cloth_batch.device)
-        
-        id_embedding = self.token_embedding(id_tokens).type(ctx_id_batch.dtype)
-        cloth_embedding = self.token_embedding(cloth_tokens).type(ctx_cloth_batch.dtype)
-        
-        # 将 [X] 软提示插入到句子开头 (SOT Token 之后)
-        # 结构: [SOT] + [X]1..M + [Qwen Macro Text] + [EOT]
-        prefix_id = id_embedding[:, :1, :]
-        suffix_id = id_embedding[:, 1 + self.M :, :]
-        prompts_id = torch.cat([prefix_id, ctx_id_batch, suffix_id], dim=1)
-        
-        prefix_cloth = cloth_embedding[:, :1, :]
-        suffix_cloth = cloth_embedding[:, 1 + self.M :, :]
-        prompts_cloth = torch.cat([prefix_cloth, ctx_cloth_batch, suffix_cloth], dim=1)
-        
-        return prompts_id, prompts_cloth, id_tokens, cloth_tokens
+        """
+        输入：
+            id_label:    [B] 连续整数身份标签（relabeled）
+            cloth_label: [B] 连续整数衣服标签（relabeled）
+            id_text:     list[str], 每张图的 Qwen 身份硬文本（如 "Man, thin body shape"）
+            cloth_text:  list[str], 每张图的 Qwen 衣服硬文本（如 "Red jacket, black pants"）
+
+        输出：
+            prompts_id:    [B, 77, 512]  含软提示的身份 embedding
+            prompts_cloth: [B, 77, 512]  含软提示的衣服 embedding
+            tk_id:         [B, 77]       身份完整 tokenized（用于定位 [EOT]）
+            tk_cloth:      [B, 77]       衣服完整 tokenized
+        """
+        ctx_id_batch = self.ctx_id[id_label]      # [B, M, 512]
+        ctx_cloth_batch = self.ctx_cloth[cloth_label]  # [B, M, 512]
+
+        prompts_id, tk_id = self._build_prompts(ctx_id_batch, id_text, "person")
+        prompts_cloth, tk_cloth = self._build_prompts(ctx_cloth_batch, cloth_text, "clothes")
+
+        return prompts_id, prompts_cloth, tk_id, tk_cloth
+
 
 class build_transformer(nn.Module):
     def __init__(self, num_classes, camera_num, view_num, cfg):
@@ -78,7 +136,7 @@ class build_transformer(nn.Module):
         self.stage = cfg.MODEL.TRAIN_STAGE
         self.in_planes = 768
         self.joint_planes = 512
-        
+
         model_path = clip._download(clip._MODELS["ViT-B-16"])
         try:
             model = torch.jit.load(model_path, map_location="cpu").eval()
@@ -89,13 +147,18 @@ class build_transformer(nn.Module):
         grid_h = cfg.INPUT.SIZE_TRAIN[0] // cfg.MODEL.STRIDE_SIZE[0]
         grid_w = cfg.INPUT.SIZE_TRAIN[1] // cfg.MODEL.STRIDE_SIZE[1]
 
-        self.clip_model = clip.build_model(state_dict or model.state_dict(), grid_h, grid_w, cfg.MODEL.STRIDE_SIZE[0])
+        self.clip_model = clip.build_model(
+            state_dict or model.state_dict(), grid_h, grid_w, cfg.MODEL.STRIDE_SIZE[0]
+        )
         self.image_encoder = self.clip_model.visual
 
-        # 构建混合提示学习器
-        self.prompt_learner = HybridPromptLearner(cfg, num_classes, self.clip_model)
-        
-        # 构建 Stage 2 的 MIPL 外科手术投影层 (Linear + BN)
+        # 从 cfg 获取 num_clothes（由 train.py 在 dataloader 后动态填入）
+        num_clothes = cfg.MODEL.NUM_CLOTHES
+
+        # 混合提示学习器
+        self.prompt_learner = HybridPromptLearner(cfg, num_classes, num_clothes, self.clip_model)
+
+        # Stage 2 的 MIPL 衣服投影层
         self.cloth_proj = nn.Sequential(
             nn.Linear(self.joint_planes, self.joint_planes, bias=False),
             nn.BatchNorm1d(self.joint_planes)
@@ -112,73 +175,99 @@ class build_transformer(nn.Module):
         self._freeze_parameters_by_stage()
 
     def _freeze_parameters_by_stage(self):
-        """核心：根据阶段严格控制梯度"""
+        """根据阶段严格控制梯度流"""
         if self.stage == 1:
-            # Stage 1: 冻结 clip_model 全部参数（含 token_embedding/positional_embedding/ln_final/text_projection）
-            # 同时冻结 Stage 2 专属层，仅放开可学习 Prompt 向量
-            for param in self.clip_model.parameters(): param.requires_grad = False
-            for param in self.classifier.parameters(): param.requires_grad = False
-            for param in self.bottleneck.parameters(): param.requires_grad = False
-            for param in self.cloth_proj.parameters(): param.requires_grad = False
+            # Stage 1：仅放开可学习 Prompt 向量，其余全冻结
+            for param in self.clip_model.parameters():
+                param.requires_grad = False
+            for param in self.classifier.parameters():
+                param.requires_grad = False
+            for param in self.bottleneck.parameters():
+                param.requires_grad = False
+            for param in self.cloth_proj.parameters():
+                param.requires_grad = False
             self.prompt_learner.ctx_id.requires_grad = True
             self.prompt_learner.ctx_cloth.requires_grad = True
 
         elif self.stage == 2:
-            # Stage 2: 冻结 clip_model 全部参数（完整锁死文本侧），放开视觉骨干和各投影/分类层
-            for param in self.clip_model.parameters(): param.requires_grad = False
+            # Stage 2：冻结文本侧，放开视觉骨干和各投影/分类层
+            for param in self.clip_model.parameters():
+                param.requires_grad = False
             self.prompt_learner.ctx_id.requires_grad = False
             self.prompt_learner.ctx_cloth.requires_grad = False
-            # image_encoder 是 clip_model.visual 的引用，单独解冻视觉参数
-            for param in self.image_encoder.parameters(): param.requires_grad = True
-            for param in self.cloth_proj.parameters(): param.requires_grad = True
-            for param in self.classifier.parameters(): param.requires_grad = True
-            for param in self.bottleneck.parameters(): param.requires_grad = True
+            for param in self.image_encoder.parameters():
+                param.requires_grad = True
+            for param in self.cloth_proj.parameters():
+                param.requires_grad = True
+            for param in self.classifier.parameters():
+                param.requires_grad = True
+            for param in self.bottleneck.parameters():
+                param.requires_grad = True
+
+    def switch_stage(self, new_stage):
+        """
+        在两阶段之间切换时调用此方法，同时更新 self.stage 并重新触发冻结逻辑。
+        比手动 model.stage=2 + model._freeze_parameters_by_stage() 更安全。
+        """
+        self.stage = new_stage
+        self._freeze_parameters_by_stage()
+        print(f">>> 模型已切换至 Stage {new_stage}，梯度状态已同步更新。")
 
     def text_encoder_forward(self, prompts, tokenized_prompts):
+        """通过 CLIP 文本 Transformer 编码混合提示"""
         x = prompts + self.clip_model.positional_embedding.type(self.clip_model.dtype)
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x.permute(1, 0, 2)   # NLD -> LND
         x = self.clip_model.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = x.permute(1, 0, 2)   # LND -> NLD
         x = self.clip_model.ln_final(x).type(self.clip_model.dtype)
-        # 获取 [EOT] 处的特征进行投影
+        # 取 [EOT] 位置的特征并投影
         x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.clip_model.text_projection
         return x
 
     def forward(self, x, label=None, cloth_label=None, id_text=None, cloth_text=None):
+        # ---- 视觉特征提取（所有阶段共用）----
         _, _, image_features_proj = self.image_encoder(x, None)
-        global_feat = image_features_proj[:, 0]
-        
+        global_feat = image_features_proj[:, 0]  # [B, 512]
+
+        # ---- 测试阶段：仅返回视觉特征 ----
         if not self.training:
             return self.bottleneck(global_feat) if self.cfg.MODEL.NECK_FEAT == 'after' else global_feat
 
         # ========================================================
-        # 阶段一：混合提示学习 (Prompt Learning)
+        # 阶段一：混合提示学习 (Hybrid Prompt Learning)
+        # 返回 [global_feat, t_id, t_cloth] 给 loss_fn Stage1 分支
         # ========================================================
         if self.stage == 1:
-            prompts_id, prompts_cloth, tk_id, tk_cloth = self.prompt_learner(label, cloth_label, id_text, cloth_text)
-            
+            prompts_id, prompts_cloth, tk_id, tk_cloth = self.prompt_learner(
+                label, cloth_label, id_text, cloth_text
+            )
             t_id = self.text_encoder_forward(prompts_id, tk_id)
             t_cloth = self.text_encoder_forward(prompts_cloth, tk_cloth)
-            
             return [global_feat, t_id, t_cloth]
 
         # ========================================================
-        # 阶段二：视觉特征解耦与微调 (Visual Feature Disentanglement)
+        # 阶段二：视觉特征解耦与微调 (MIPL Disentanglement)
+        # 返回 cls_score, [global_feat, f_img2clo, t_cloth_gt]
         # ========================================================
         elif self.stage == 2:
             feat = self.bottleneck(global_feat)
             cls_score = self.classifier(feat)
-            
-            # 步骤 A：提取当前图片的专属衣服映射特征 F_img2clo
+
+            # 步骤 A：提取衣服映射特征
             f_img2clo = self.cloth_proj(global_feat)
-            
-            # 同样获取当前 Batch 的真实文本特征用于 L_sc 监督
-            prompts_id, prompts_cloth, tk_id, tk_cloth = self.prompt_learner(label, cloth_label, id_text, cloth_text)
-            t_cloth_gt = self.text_encoder_forward(prompts_cloth, tk_cloth)
-            
+
+            # 步骤 B：获取当前 Batch 的真实衣服文本特征（用于 L_sc 监督）
+            # 注意：prompt_learner 参数已冻结，此处 t_cloth_gt 显式 detach()
+            # 确保 L_sc 的监督信号不会意外回传到文本侧
+            prompts_id, prompts_cloth, tk_id, tk_cloth = self.prompt_learner(
+                label, cloth_label, id_text, cloth_text
+            )
+            t_cloth_gt = self.text_encoder_forward(prompts_cloth, tk_cloth).detach()
+
             return cls_score, [global_feat, f_img2clo, t_cloth_gt]
+
 
 def make_model(cfg, num_class, camera_num, view_num):
     if cfg.MODEL.NAME == 'ViT-B-16':
         return build_transformer(num_class, camera_num, view_num, cfg)
-    raise NotImplementedError()
+    raise NotImplementedError(f"不支持的模型: {cfg.MODEL.NAME}")

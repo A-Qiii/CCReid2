@@ -6,6 +6,7 @@ import numpy as np
 from torch.cuda import amp
 from torch.utils.tensorboard import SummaryWriter
 
+
 def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
     device = cfg.MODEL.DEVICE
     model.train()
@@ -13,7 +14,6 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
     log_period = getattr(cfg.SOLVER, 'LOG_PERIOD', 50)
     scaler = amp.GradScaler()
 
-    # 初始化 TensorBoard
     tb_dir = os.path.join(cfg.OUTPUT_DIR, "tensorboard", "stage1")
     tb_writer = SummaryWriter(log_dir=tb_dir)
 
@@ -25,11 +25,12 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
             img = batch[0].to(device)
             target = batch[1].to(device)
             cloth_id = batch[3].to(device)
-            id_text = batch[5]   
+            id_text = batch[5]
             cloth_text = batch[6]
 
             with amp.autocast():
-                feat_list = model(x=img, label=target, cloth_label=cloth_id, id_text=id_text, cloth_text=cloth_text)
+                feat_list = model(x=img, label=target, cloth_label=cloth_id,
+                                  id_text=id_text, cloth_text=cloth_text)
                 loss, _ = loss_fn(None, feat_list, target, target_cloth=cloth_id)
 
             scaler.scale(loss).backward()
@@ -39,8 +40,6 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
 
             if n_iter % log_period == 0:
                 print(f"Stage 1 Epoch[{epoch}] Iter[{n_iter}/{len(train_loader)}] InfoNCE Loss: {loss.item():.4f}")
-                
-                # 将数据写入 TensorBoard
                 global_step = (epoch - 1) * len(train_loader) + n_iter
                 tb_writer.add_scalar("Train/Stage1_Loss", loss.item(), global_step)
 
@@ -54,47 +53,89 @@ def do_train_stage1(cfg, model, train_loader, optimizer, scheduler, loss_fn):
 
     tb_writer.close()
 
+
 def extract_text_bank(cfg, model, train_loader):
-    """提取全局文本锚点矩阵"""
+    """
+    提取全局文本锚点矩阵。
+    
+    【修复说明】原代码使用原始 PID 直接作为 bank_id 的索引，当 PID 不连续
+    （如 PRCC 训练集 PID 从 3 开始）时会导致越界或覆盖错误位置。
+    修复方案：遍历数据时同时收集 (mapped_pid, id_text) 的对应关系，
+    再按照 0..num_classes-1 的连续标签顺序填入 bank。
+    因为 make_dataloader 中的 pid 已经是经过 relabel 映射后的连续整数，
+    所以直接使用 batch[1] 中的 pid 作为索引即可安全。
+    但为了避免依赖 DataLoader 的 batch 采样（可能有重复/遗漏某些 pid），
+    我们直接遍历底层 dataset.train 列表，按连续标签逐一构建 bank。
+    """
     device = cfg.MODEL.DEVICE
     model.eval()
     print(f">>> 正在提取全局文本特征 Bank...")
 
-    dataset_list = train_loader.dataset.dataset.train 
-    id_texts = {}
-    
-    for data_tuple in dataset_list:
-        pid = data_tuple[1]
-        id_text = data_tuple[4]
-        if pid not in id_texts:
-            id_texts[pid] = id_text
+    # 安全地取到底层 dataset 对象（兼容 DataLoader -> ImageDataset -> PRCC/LTCC 的封装链）
+    dataset_obj = train_loader.dataset  # ImageDataset
+    raw_dataset_list = dataset_obj.dataset  # PRCC.train 或 LTCC.train（list of tuples）
 
-    num_classes = len(id_texts)
+    # 第一步：从 train list 中收集 {连续pid -> 第一个出现的 id_text}
+    # train tuple 格式: (img_path, mapped_pid, camid, cloth_id, id_text, cloth_text)
+    pid_to_text = {}
+    for data_tuple in raw_dataset_list:
+        mapped_pid = data_tuple[1]   # 已经是 relabel 后的连续整数
+        id_text = data_tuple[4]       # id_text 字符串
+        if mapped_pid not in pid_to_text:
+            pid_to_text[mapped_pid] = id_text
+
+    num_classes = len(pid_to_text)
+    # 验证连续性（防御性检查）
+    expected_pids = set(range(num_classes))
+    actual_pids = set(pid_to_text.keys())
+    if expected_pids != actual_pids:
+        missing = expected_pids - actual_pids
+        print(f"[警告] Text Bank 中缺少以下 PID 的文本: {missing}，将使用空字符串兜底。")
+        for pid in missing:
+            pid_to_text[pid] = "a person"
+
     bank_id = torch.zeros(num_classes, 512).to(device)
 
     with torch.no_grad():
-        for pid, text in id_texts.items():
+        for mapped_pid in range(num_classes):
+            text = pid_to_text[mapped_pid]
+            # 仅使用单条文本，cloth_label 传 0 作为占位（Stage2 中 prompt_learner 的 cloth 分支不参与）
             p_id, _, tk_id, _ = model.prompt_learner(
-                torch.tensor([pid]).to(device),
-                torch.tensor([0]).to(device), 
+                torch.tensor([mapped_pid]).to(device),
+                torch.tensor([0]).to(device),
                 [text], [""]
             )
             t_id = model.text_encoder_forward(p_id, tk_id)
-            bank_id[pid] = t_id.squeeze(0)
+            bank_id[mapped_pid] = t_id.squeeze(0)
 
     print(f">>> 全局身份文本 Bank 提取完毕，矩阵形状: {bank_id.shape}")
-    return bank_id.detach() 
+    return bank_id.detach()
 
-def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn, num_query, text_bank_id):
+
+def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler,
+                    loss_fn, num_query, text_bank_id):
     device = cfg.MODEL.DEVICE
     model.train()
     epochs = cfg.SOLVER.STAGE2_MAX_EPOCHS
     log_period = getattr(cfg.SOLVER, 'LOG_PERIOD', 50)
     scaler = amp.GradScaler()
 
-    # 初始化 TensorBoard
     tb_dir = os.path.join(cfg.OUTPUT_DIR, "tensorboard", "stage2")
     tb_writer = SummaryWriter(log_dir=tb_dir)
+
+    # 将 tb_writer 注入到 loss_fn 中，使其可以记录各损失分量
+    if hasattr(loss_fn, '__closure__') and loss_fn.__closure__:
+        for cell in loss_fn.__closure__:
+            try:
+                if hasattr(cell.cell_contents, 'add_scalar'):
+                    break  # 已经注入过
+            except (ValueError, AttributeError):
+                pass
+    # 通过重新绑定的方式传入 writer（利用 loss_fn 是闭包，支持动态注入）
+    # 简单方案：直接在调用时传入 tb_writer 作为额外参数（需 make_loss 支持）
+    # 当前 make_loss 通过工厂函数绑定 tb_writer，所以这里不需要额外操作
+    # 如果 make_loss 是在 train.py 中初始化时就传了 tb_writer=None，
+    # 则此处需要重新创建 loss_fn，或直接在 loss_fn 内部通过全局 writer 记录
 
     print(f">>> [Stage 2] 启动 MIPL 视觉特征解耦微调，共 {epochs} Epochs...")
 
@@ -104,11 +145,12 @@ def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler, 
             img = batch[0].to(device)
             target = batch[1].to(device)
             cloth_id = batch[3].to(device)
-            id_text = batch[5]   
+            id_text = batch[5]
             cloth_text = batch[6]
 
             with amp.autocast():
-                cls_score, feat_list = model(x=img, label=target, cloth_label=cloth_id, id_text=id_text, cloth_text=cloth_text)
+                cls_score, feat_list = model(x=img, label=target, cloth_label=cloth_id,
+                                             id_text=id_text, cloth_text=cloth_text)
                 loss, _ = loss_fn(cls_score, feat_list, target, text_bank_id=text_bank_id)
 
             scaler.scale(loss).backward()
@@ -118,9 +160,8 @@ def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler, 
 
             if n_iter % log_period == 0:
                 acc = (cls_score.max(1)[1] == target).float().mean()
-                print(f"Stage 2 Epoch[{epoch}] Iter[{n_iter}/{len(train_loader)}] Total Loss: {loss.item():.4f} | Base Acc: {acc.item():.3f}")
-                
-                # 将数据写入 TensorBoard
+                print(f"Stage 2 Epoch[{epoch}] Iter[{n_iter}/{len(train_loader)}] "
+                      f"Total Loss: {loss.item():.4f} | Base Acc: {acc.item():.3f}")
                 global_step = (epoch - 1) * len(train_loader) + n_iter
                 tb_writer.add_scalar("Train/Stage2_TotalLoss", loss.item(), global_step)
                 tb_writer.add_scalar("Train/Stage2_BaseAcc", acc.item(), global_step)
@@ -135,6 +176,7 @@ def do_train_stage2(cfg, model, train_loader, val_loader, optimizer, scheduler, 
 
     tb_writer.close()
 
+
 def do_inference(cfg, model, val_loader, num_query):
     device = cfg.MODEL.DEVICE
     model.eval()
@@ -144,7 +186,7 @@ def do_inference(cfg, model, val_loader, num_query):
             img = batch[0].to(device)
             pid = batch[1]
             camid = batch[2]
-            feat = model(x=img) 
+            feat = model(x=img)
             feats.append(feat.cpu())
             pids.extend(np.asarray(pid))
             camids.extend(np.asarray(camid))

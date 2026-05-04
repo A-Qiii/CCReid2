@@ -25,7 +25,7 @@ def make_dataloader(cfg):
         T.Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD)
     ])
 
-    # 2. 数据集路由：注入 JSON 绝对路径
+    # 2. 数据集路由
     num_workers = cfg.DATALOADER.NUM_WORKERS
     if cfg.DATASETS.NAMES == 'ltcc':
         dataset = LTCC(root=cfg.DATASETS.ROOT_DIR, llava_json_path=cfg.DATASETS.LLAVA_JSON_PATH)
@@ -34,10 +34,9 @@ def make_dataloader(cfg):
     else:
         raise RuntimeError(f"不支持的数据集: {cfg.DATASETS.NAMES}")
 
-    # 3. 封装 Dataloader：注入 llava_dict，彻底切除 STAGE2 冗余
+    # 3. 封装训练集
     train_set = ImageDataset(dataset.train, train_transforms, llava_dict=dataset.llava_dict)
 
-    # 直接使用全局 IMS_PER_BATCH 控制采样器
     train_loader = DataLoader(
         train_set,
         batch_size=cfg.SOLVER.IMS_PER_BATCH,
@@ -51,7 +50,10 @@ def make_dataloader(cfg):
         drop_last=True
     )
 
-    val_set = ImageDataset(dataset.query + dataset.gallery, val_transforms, llava_dict=dataset.llava_dict)
+    # 4. 封装验证集（query + gallery 拼接）
+    val_set = ImageDataset(
+        dataset.query + dataset.gallery, val_transforms, llava_dict=dataset.llava_dict
+    )
     val_loader = DataLoader(
         val_set,
         batch_size=cfg.TEST.IMS_PER_BATCH,
@@ -60,4 +62,15 @@ def make_dataloader(cfg):
         collate_fn=None
     )
 
-    return train_loader, train_loader, val_loader, len(dataset.query), dataset.num_train_pids, dataset.num_train_cams, 0
+    # 5. view_num：用 getattr 兜底为 1，兼容 PRCC（无此属性）和 LTCC（有此属性=1）
+    view_num = getattr(dataset, 'num_train_vids', 1)
+
+    return (
+        train_loader,
+        train_loader,
+        val_loader,
+        len(dataset.query),
+        dataset.num_train_pids,
+        dataset.num_train_cams,
+        view_num
+    )

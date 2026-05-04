@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 import os
 
+
 def read_image(img_path):
     got_img = False
     if not os.path.exists(img_path):
@@ -16,7 +17,25 @@ def read_image(img_path):
             pass
     return img
 
+
 class ImageDataset(Dataset):
+    """
+    统一数据集封装。
+
+    JSON 格式约定（PRCC 与 LTCC 统一）：
+    {
+        "identity_features": "Man, thin body shape, short black hair",
+        "clothing_features": "Red jacket, black pants, black shoes"
+    }
+
+    JSON 主键格式：
+    - PRCC: "pid文件夹/文件名"，如 "003/A003_0001.jpg"
+    - LTCC: 纯文件名，如 "001_01_c3.png"
+
+    __getitem__ 返回 7 元组：
+        img, pid, camid, cloth_id, 0, id_text, cloth_text
+    """
+
     def __init__(self, dataset, transform=None, llava_dict=None):
         self.dataset = dataset
         self.transform = transform
@@ -38,8 +57,9 @@ class ImageDataset(Dataset):
 
         # -------------------------------------------------------
         # 文本读取：统一使用 identity_features / clothing_features
-        # JSON 主键优先尝试 "pid文件夹/文件名" (PRCC格式)，
-        # 兜底尝试纯文件名 (LTCC格式)，最终兜底用空字典
+        # 优先以 "pid文件夹/文件名" 作为 key（兼容 PRCC）
+        # 兜底以纯文件名作为 key（兼容 LTCC）
+        # 最终兜底使用默认占位符
         # -------------------------------------------------------
         img_name = os.path.basename(img_path)
         parent_dir = os.path.basename(os.path.dirname(img_path))
@@ -47,8 +67,7 @@ class ImageDataset(Dataset):
 
         info = self.llava_dict.get(prcc_key, self.llava_dict.get(img_name, {}))
 
-        id_text   = info.get("identity_features",  "a person")
+        id_text = info.get("identity_features", "a person")
         cloth_text = info.get("clothing_features", "clothes")
 
-        # 恢复 I/O 契约：返回 7 个元素
         return img, pid, camid, cloth_id, 0, id_text, cloth_text
