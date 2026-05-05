@@ -1,9 +1,12 @@
 """
 test_visualize.py
 =================
-测试阶段可视化脚本，生成两类论文级图表：
-  1. 检索结果可视化（Top-K Retrieval）：绿框=正确，红框=错误
-  2. t-SNE 特征分布图：展示特征聚类效果
+测试阶段可视化脚本，生成三类论文级图表：
+  1. 检索结果可视化（Top-K Retrieval）
+  2. t-SNE 特征分布图（换装感知版）
+     - 颜色 = 身份（同色=同人）
+     - 形状 = 衣服（● = Gallery原装, ★ = Query换装）
+     - 边框粗细 = Query(粗黑边框) / Gallery(无边框)
 
 使用方法：
     python test_visualize.py \
@@ -37,7 +40,6 @@ def load_model_and_data(cfg, weight_path):
     if not os.path.exists(weight_path):
         raise FileNotFoundError(f"权重文件不存在: {weight_path}")
 
-    # 从 checkpoint 直接读取真实维度，避免 NUM_CLOTHES=0 导致结构不匹配
     ckpt = torch.load(weight_path, map_location='cpu')
     num_clothes_ckpt = (ckpt['prompt_learner.ctx_cloth'].shape[0]
                         if 'prompt_learner.ctx_cloth' in ckpt else 1000)
@@ -57,7 +59,8 @@ def load_model_and_data(cfg, weight_path):
     return model, val_loader, num_query, num_classes_ckpt
 
 
-def get_image_paths(cfg):
+def get_dataset_info(cfg):
+    """获取 query/gallery 的图片路径和衣服ID"""
     if cfg.DATASETS.NAMES == 'prcc':
         dataset = PRCC(root=cfg.DATASETS.ROOT_DIR,
                        llava_json_path=cfg.DATASETS.LLAVA_JSON_PATH)
@@ -66,9 +69,12 @@ def get_image_paths(cfg):
                        llava_json_path=cfg.DATASETS.LLAVA_JSON_PATH)
     else:
         raise ValueError(f"不支持的数据集: {cfg.DATASETS.NAMES}")
-    q_paths = [x[0] for x in dataset.query]
-    g_paths = [x[0] for x in dataset.gallery]
-    return q_paths, g_paths
+
+    q_paths    = [x[0] for x in dataset.query]
+    g_paths    = [x[0] for x in dataset.gallery]
+    q_clothids = np.asarray([x[3] for x in dataset.query])
+    g_clothids = np.asarray([x[3] for x in dataset.gallery])
+    return q_paths, g_paths, q_clothids, g_clothids
 
 
 # ──────────────────────────────────────────────
@@ -98,12 +104,10 @@ def plot_retrieval(feats, pids, camids, q_paths, g_paths,
     for row, q_idx in enumerate(sampled):
         q_pid   = q_pids[q_idx]
         q_camid = q_camids[q_idx]
-
-        order  = indices[q_idx]
-        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
+        order   = indices[q_idx]
+        remove  = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
         valid_order = order[~remove]
 
-        # Query 列
         ax = axes[row, 0]
         try:
             img = Image.open(q_paths[q_idx]).convert('RGB')
@@ -115,7 +119,6 @@ def plot_retrieval(feats, pids, camids, q_paths, g_paths,
         for sp in ax.spines.values():
             sp.set_edgecolor('#2196F3'); sp.set_linewidth(3)
 
-        # Top-K 列
         for col in range(top_k):
             ax = axes[row, col + 1]
             if col >= len(valid_order):
@@ -148,82 +151,147 @@ def plot_retrieval(feats, pids, camids, q_paths, g_paths,
 
 
 # ──────────────────────────────────────────────
-# 图2：t-SNE 特征分布可视化
+# 图2：换装感知 t-SNE 特征分布可视化
+# 颜色=身份  形状=Query(★)/Gallery(●)  边框粗细=是否Query
 # ──────────────────────────────────────────────
-def plot_tsne(feats, pids, num_query, output_dir, max_ids=20, max_samples=1000):
-    print(">>> 正在计算 t-SNE...")
-    all_feats = feats.numpy()
-    all_pids  = np.asarray(pids)
-    is_query  = np.array([True]*num_query + [False]*(len(pids)-num_query))
+def plot_tsne_cloth_aware(feats, pids, camids, q_clothids, g_clothids,
+                          num_query, output_dir, max_ids=20, max_samples=1000):
+    """
+    换装感知 t-SNE（对齐你的设计方案）：
+    - 颜色  = 身份（同色=同一个人）
+    - 形状  = 衣服（每个身份内部按衣服编号：○=衣1  □=衣2  △=衣3  ◇=衣4+）
+    - 边框  = Query 有粗黑边框，Gallery 无边框
+
+    健康状态（解耦成功）：
+      问题①：同色不同形状是否聚在一起？→ 是 = 换装鲁棒，L_de/L_sc 有效
+      问题②：★(Query) 是否落在自己颜色的●团内？→ 是 = 跨摄像头对齐，L_Guide 有效
+
+    问题状态（解耦失败）：
+      同色不同形状分散各处 → L_de 过强，破坏身份特征
+      ★ 落入其他颜色的团 → 检索会错
+    """
+    print(">>> 正在计算换装感知 t-SNE（约1-2分钟）...")
+
+    all_feats    = feats.numpy()
+    all_pids     = np.asarray(pids)
+    is_query     = np.array([True]*num_query + [False]*(len(pids)-num_query))
+    all_clothids = np.concatenate([q_clothids, g_clothids])
 
     unique_pids = np.unique(all_pids)[:max_ids]
     mask = np.isin(all_pids, unique_pids)
-    sf, sp, sq = all_feats[mask], all_pids[mask], is_query[mask]
+    sf, sp, sq, sc = all_feats[mask], all_pids[mask], is_query[mask], all_clothids[mask]
 
     if len(sf) > max_samples:
         idx = np.random.choice(len(sf), max_samples, replace=False)
-        sf, sp, sq = sf[idx], sp[idx], sq[idx]
+        sf, sp, sq, sc = sf[idx], sp[idx], sq[idx], sc[idx]
 
     coords = TSNE(n_components=2, random_state=42,
                   perplexity=30, max_iter=1000).fit_transform(sf)
 
-    cmap = plt.cm.get_cmap('tab20', max_ids)
+    cmap      = plt.cm.get_cmap('tab20', max_ids)
     pid_color = {pid: cmap(i) for i, pid in enumerate(unique_pids)}
 
-    fig, ax = plt.subplots(figsize=(10, 8))
+    # 为每个身份内部的衣服分配局部编号 → 形状
+    # ○圆=衣1  □方=衣2  △三角=衣3  ◇菱形=衣4+
+    marker_pool = ['o', 's', '^', 'D', 'p', 'h']
+
+    # 建立 (pid, cloth_id) → 局部cloth编号 的映射
+    pid_cloth_map = {}  # {pid: {cloth_id: local_idx}}
+    for pid in unique_pids:
+        pid_mask   = sp == pid
+        pid_cloths = np.unique(sc[pid_mask])
+        pid_cloth_map[pid] = {cid: i for i, cid in enumerate(sorted(pid_cloths))}
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+
+    # 先画 Gallery（底层，无边框）
     for pid in unique_pids:
         c = pid_color[pid]
-        gm = (sp == pid) & ~sq
-        if gm.any():
-            ax.scatter(coords[gm, 0], coords[gm, 1],
-                       c=[c], marker='o', s=40, alpha=0.7,
-                       edgecolors='none', label=f'ID {pid}')
-        qm = (sp == pid) & sq
-        if qm.any():
-            ax.scatter(coords[qm, 0], coords[qm, 1],
-                       c=[c], marker='*', s=150, alpha=1.0,
-                       edgecolors='black', linewidths=0.5)
+        for cid, local_idx in pid_cloth_map[pid].items():
+            marker = marker_pool[min(local_idx, len(marker_pool)-1)]
+            gm = (sp == pid) & (sc == cid) & ~sq
+            if gm.any():
+                ax.scatter(coords[gm, 0], coords[gm, 1],
+                           c=[c], marker=marker, s=55, alpha=0.7,
+                           edgecolors='none', zorder=2)
+
+    # 再画 Query（顶层，粗黑边框）
+    for pid in unique_pids:
+        c = pid_color[pid]
+        for cid, local_idx in pid_cloth_map[pid].items():
+            marker = marker_pool[min(local_idx, len(marker_pool)-1)]
+            qm = (sp == pid) & (sc == cid) & sq
+            if qm.any():
+                ax.scatter(coords[qm, 0], coords[qm, 1],
+                           c=[c], marker=marker, s=200, alpha=1.0,
+                           edgecolors='black', linewidths=1.5, zorder=5)
+
+    # 图例区域
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    # 左下：形状图例（衣服编号）
+    shape_legend = [
+        Line2D([0],[0], marker=marker_pool[i], color='gray', markersize=9,
+               linestyle='None', label=f'Cloth {i+1}')
+        for i in range(min(4, max([len(v) for v in pid_cloth_map.values()])))
+    ]
+    shape_legend += [
+        Line2D([0],[0], marker='o', color='gray', markersize=8,
+               markeredgecolor='none', linestyle='None', label='Gallery (no border)'),
+        Line2D([0],[0], marker='o', color='gray', markersize=10,
+               markeredgecolor='black', markeredgewidth=1.5,
+               linestyle='None', label='Query (black border)'),
+    ]
+    leg1 = ax.legend(handles=shape_legend, loc='lower left',
+                     fontsize=8, framealpha=0.9,
+                     title='Shape=Cloth  Border=Query/Gallery')
+
+    # 右上：颜色图例（身份）
+    color_handles = [
+        Line2D([0],[0], marker='o', color=pid_color[pid], markersize=8,
+               linestyle='None', label=f'ID {pid}')
+        for pid in unique_pids
+    ]
+    ax.add_artist(leg1)
+    ax.legend(handles=color_handles, bbox_to_anchor=(1.01, 1), loc='upper left',
+              fontsize=7, ncol=2, title='Color = Identity')
 
     ax.set_title(
-        f't-SNE Feature Distribution  |  {cfg.DATASETS.NAMES.upper()}\n'
-        f'★=Query  ●=Gallery  (Top-{max_ids} identities)',
-        fontsize=12, fontweight='bold'
+        f't-SNE: Cloth-Aware Feature Distribution  |  {cfg.DATASETS.NAMES.upper()}\n'
+        f'Color=Identity  Shape=Cloth  Large+Border=Query  Small=Gallery',
+        fontsize=11, fontweight='bold'
     )
     ax.set_xlabel('t-SNE Dim 1')
     ax.set_ylabel('t-SNE Dim 2')
-    ax.legend(bbox_to_anchor=(1.01, 1), loc='upper left',
-              fontsize=7, ncol=2, markerscale=1.2)
     ax.grid(True, alpha=0.2)
+
+
+
     plt.tight_layout()
-    path = os.path.join(output_dir, 'fig8_tsne_feature_dist.png')
+    path = os.path.join(output_dir, 'fig8_tsne_cloth_aware.png')
     plt.savefig(path, bbox_inches='tight', dpi=150)
     plt.close()
     print(f"[已保存] {path}")
+    print("  诊断①: 同色不同形状聚团? → 是=换装鲁棒(L_sc/L_de有效)")
+    print("  诊断②: ★Query落在同色●团内? → 是=跨摄像头对齐(L_Guide有效)")
+    print("  诊断③: 不同颜色的团清晰分开? → 是=身份判别力强(L_ce/L_tri有效)")
 
 
 # ──────────────────────────────────────────────
-# 主函数（注意：不包含 opts 参数，避免与 -- 参数冲突）
+# 主函数
 # ──────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="CC-ReID 测试阶段可视化")
-    parser.add_argument("--config_file",  type=str, required=True,
-                        help="配置文件路径")
-    parser.add_argument("--weight_path",  type=str, default="",
-                        help="模型权重路径，留空则自动在 OUTPUT_DIR 下寻找最新权重")
-    parser.add_argument("--output_dir",   type=str, default="./vis_test",
-                        help="可视化图表输出目录")
-    parser.add_argument("--num_vis",      type=int, default=10,
-                        help="检索可视化展示的 Query 数量")
-    parser.add_argument("--top_k",        type=int, default=5,
-                        help="每个 Query 展示的检索结果数量")
-    parser.add_argument("--max_tsne_ids", type=int, default=20,
-                        help="t-SNE 图展示的最大身份数量")
-    # 注意：此处不再添加 opts 参数，测试脚本所有配置通过 --config_file 指定
+    parser.add_argument("--config_file",  type=str, required=True)
+    parser.add_argument("--weight_path",  type=str, default="")
+    parser.add_argument("--output_dir",   type=str, default="./vis_test")
+    parser.add_argument("--num_vis",      type=int, default=10)
+    parser.add_argument("--top_k",        type=int, default=5)
+    parser.add_argument("--max_tsne_ids", type=int, default=20)
     args = parser.parse_args()
 
-    # 加载配置（仅从文件读取，不支持命令行覆盖，避免歧义）
     cfg.merge_from_file(args.config_file)
-    # 测试阶段强制设置 Stage=2（确保模型结构正确）
     cfg.defrost()
     cfg.MODEL.TRAIN_STAGE = 2
     cfg.freeze()
@@ -245,26 +313,25 @@ def main():
                 break
     if not weight_path or not os.path.exists(weight_path):
         raise FileNotFoundError(
-            f"找不到权重文件。请用 --weight_path 手动指定，或确认 OUTPUT_DIR={cfg.OUTPUT_DIR} 下存在权重。")
+            f"找不到权重文件，请用 --weight_path 手动指定。"
+            f"OUTPUT_DIR={cfg.OUTPUT_DIR}")
 
-    print(f"\n{'='*50}")
+    print(f"\n{'='*55}")
     print(f"数据集    : {cfg.DATASETS.NAMES.upper()}")
     print(f"权重文件  : {weight_path}")
     print(f"输出目录  : {args.output_dir}")
-    print(f"{'='*50}\n")
+    print(f"{'='*55}\n")
 
-    # 加载模型并提取特征
     model, val_loader, num_query, num_classes = load_model_and_data(cfg, weight_path)
     feats, pids, camids = do_inference(cfg, model, val_loader, num_query)
 
-    # 评测指标
     q_pids   = np.asarray(pids[:num_query])
     g_pids   = np.asarray(pids[num_query:])
     q_camids = np.asarray(camids[:num_query])
     g_camids = np.asarray(camids[num_query:])
     distmat  = torch.cdist(feats[:num_query], feats[num_query:]).numpy()
 
-    use_cc = (cfg.DATASETS.NAMES == 'ltcc')
+    use_cc      = (cfg.DATASETS.NAMES == 'ltcc')
     q_cloth = g_cloth = None
     if use_cc:
         ds = LTCC(root=cfg.DATASETS.ROOT_DIR,
@@ -282,17 +349,22 @@ def main():
     print(f"Rank-10: {cmc[9]:.1%}")
     print("=" * 30)
 
-    # 获取图片路径并生成可视化
-    q_paths, g_paths = get_image_paths(cfg)
+    # 获取路径和衣服ID
+    q_paths, g_paths, q_clothids, g_clothids = get_dataset_info(cfg)
+
+    # 生成可视化
     plot_retrieval(feats, pids, camids, q_paths, g_paths,
                    num_query, args.output_dir,
                    num_vis=args.num_vis, top_k=args.top_k)
-    plot_tsne(feats, pids, num_query, args.output_dir,
-              max_ids=args.max_tsne_ids)
+
+    plot_tsne_cloth_aware(feats, pids, camids,
+                          q_clothids, g_clothids,
+                          num_query, args.output_dir,
+                          max_ids=args.max_tsne_ids)
 
     print(f"\n✅ 所有可视化已保存至: {args.output_dir}")
-    print("  fig7 - 检索结果可视化")
-    print("  fig8 - t-SNE 特征分布图")
+    print("  fig7 - 检索结果可视化（论文实验章节）")
+    print("  fig8 - 换装感知 t-SNE 特征分布图（论文分析章节）")
 
 
 if __name__ == '__main__':

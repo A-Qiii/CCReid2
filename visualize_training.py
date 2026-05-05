@@ -396,8 +396,120 @@ def main():
     plot_two_stage_overview(data_s1, data_s2, args.output_dir, config_label)
     plot_decoupling_health(data_s2, args.output_dir, config_label)
 
+    print_final_summary(data_s1, data_s2)
     print(f"\n✅ 全部图表已保存至: {args.output_dir}")
 
 
 if __name__ == '__main__':
     main()
+
+
+"""
+======================================================================
+将下方代码追加到 visualize_training.py 文件末尾，
+并在 main() 函数最后一行 print("✅ ...") 之前插入：
+
+    print_final_summary(data_s1, data_s2)
+
+======================================================================
+"""
+
+def print_final_summary(data_s1, data_s2, tail=50):
+    """
+    打印训练结束时各关键指标的数值摘要（取最后 tail 个点的均值）。
+    tail=50 对应约最后 500 个 iter（每 10 iter 记录一次），
+    相当于 Stage 2 最后 ~2 个 epoch 的平均水平。
+    """
+    SEP = "=" * 62
+
+    def tail_mean(data, key):
+        if key not in data:
+            return None
+        v = data[key]['value']
+        return float(np.mean(v[-tail:]))
+
+    def tail_last(data, key):
+        if key not in data:
+            return None
+        v = data[key]['value']
+        return float(v[-1])
+
+    print(f"\n{SEP}")
+    print("  📊 训练结束数值摘要（最后 ~{} 个记录点均值）".format(tail))
+    print(SEP)
+
+    # ── Stage 1 ──────────────────────────────────────────────────
+    s1_loss = tail_mean(data_s1, 'Train/Stage1_Loss')
+    s1_pos  = tail_mean(data_s1, 'Train/Stage1_PosSim')
+    s1_neg  = tail_mean(data_s1, 'Train/Stage1_NegSim')
+    print("\n【Stage 1 - Prompt Learning】")
+    print(f"  InfoNCE Loss (尾段均值) : {s1_loss:.4f}" if s1_loss else "  InfoNCE Loss           : 无数据")
+    if s1_pos and s1_neg:
+        gap = s1_pos - s1_neg
+        status = "✅ 健康" if gap > 0.05 else ("⚠️  挣扎" if gap > 0 else "❌ 坍塌")
+        print(f"  正样本余弦相似度        : {s1_pos:.4f}")
+        print(f"  负样本余弦相似度        : {s1_neg:.4f}")
+        print(f"  Margin Gap (正-负)     : {gap:+.4f}  {status}")
+
+    # ── Stage 2 基础损失 ─────────────────────────────────────────
+    print("\n【Stage 2 - 基础损失】")
+    for key, name in [
+        ('Train/Stage2_TotalLoss', 'Total Loss      '),
+        ('Train/Stage2_L_ce',      'L_ce (分类)     '),
+        ('Train/Stage2_L_tri',     'L_tri (三元组)  '),
+        ('Train/Stage2_L_Guide',   'L_Guide (ID锚点)'),
+        ('Train/Stage2_BaseAcc',   'Train Accuracy  '),
+    ]:
+        val = tail_mean(data_s2, key)
+        if val is not None:
+            suffix = f"  ({val:.1%})" if 'Acc' in key else ""
+            print(f"  {name}: {val:.4f}{suffix}")
+
+    # ── Stage 2 解耦损失 ─────────────────────────────────────────
+    print("\n【Stage 2 - MIPL 解耦损失】")
+    l_sc  = tail_mean(data_s2, 'Train/Stage2_L_sc')
+    l_clt = tail_mean(data_s2, 'Train/Stage2_L_cloth_tri')
+    l_de  = tail_mean(data_s2, 'Train/Stage2_L_de')
+    if l_sc  is not None: print(f"  L_sc  (语义对齐)        : {l_sc:.4f}  {'✅' if l_sc < 0.05 else '⚠️ '} (目标 < 0.05)")
+    if l_clt is not None: print(f"  L_cloth_tri (衣服判别)  : {l_clt:.4f}")
+    if l_de  is not None: print(f"  L_de  (正交排斥)        : {l_de:.4f}  {'✅' if l_de < 0.1 else '⚠️ '} (目标 < 0.1)")
+
+    # ── Proj_c 健康探针 ──────────────────────────────────────────
+    print("\n【Proj_c 健康探针】")
+    w_mean   = tail_mean(data_s2, 'ProjC/gate_w_mean')
+    s_align  = tail_mean(data_s2, 'ProjC/cloth_align_s_mean')
+    intra    = tail_mean(data_s2, 'ProjC/intra_cloth_sim')
+    inter    = tail_mean(data_s2, 'ProjC/inter_cloth_sim')
+
+    if w_mean  is not None:
+        status = "✅ 门控充分激活" if w_mean > 0.6 else ("⚠️  门控部分激活" if w_mean > 0.3 else "❌ 门控几乎未激活（L_de 无效）")
+        print(f"  gate_w_mean (门控均值) : {w_mean:.3f}  {status}")
+    if s_align is not None:
+        status = "✅" if s_align > 0.4 else "⚠️ "
+        print(f"  cloth_align_s_mean     : {s_align:.3f}  {status} (目标 > 0.4，衣服对齐质量)")
+    if intra   is not None:
+        status = "✅" if intra > 0.4 else "⚠️ "
+        print(f"  intra_cloth_sim (同衣) : {intra:.3f}  {status} (目标 > 0.4)")
+    if inter   is not None:
+        status = "✅" if inter < 0.2 else "⚠️ "
+        print(f"  inter_cloth_sim (异衣) : {inter:.3f}  {status} (目标 < 0.2)")
+
+    # ── 综合诊断 ─────────────────────────────────────────────────
+    print(f"\n【综合诊断】")
+    problems = []
+    if s1_pos and s1_neg and (s1_pos - s1_neg) <= 0:
+        problems.append("Stage 1 正负样本未分离，提示词学习可能失败")
+    if l_sc and l_sc > 0.1:
+        problems.append(f"L_sc={l_sc:.4f} 偏高，Proj_c 衣服对齐仍不充分")
+    if w_mean and w_mean < 0.3:
+        problems.append(f"gate_w={w_mean:.3f} 过低，L_de 对本次训练几乎无贡献")
+    if intra and inter and intra < inter:
+        problems.append("同衣相似度 < 异衣相似度，Proj_c 发生模式坍塌！")
+
+    if not problems:
+        print("  ✅ 未检测到明显问题，训练动态正常。")
+    else:
+        for p in problems:
+            print(f"  ⚠️  {p}")
+
+    print(f"{SEP}\n")

@@ -18,6 +18,7 @@ python test_visualize.py \
   --weight_path ./logs/final_exp/stage2_disentangled_model_15.pth \
   --output_dir ./logs/final_exp/vis_test_ep15
 
+tensorboard --logdir ./logs/final_exp/tensorboard/stage1 --port 6006
 
 
 
