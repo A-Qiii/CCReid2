@@ -1,0 +1,75 @@
+# ============================================================
+# 正式训练配置文件
+# 根据预实验结论：
+#   - Stage1 LR=3.5e-4 已足够，30轮曲线接近收敛，正式用60轮
+#   - I2T_CLOTH_ORTHO_WEIGHT 保持 0.05（L_de动态平衡是正常的）
+#   - Stage2 用 30轮，Warmup 10轮
+# ============================================================
+
+MODEL:
+  PRETRAIN_CHOICE: 'imagenet'
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'on'
+  IF_WITH_CENTER: 'no'
+  NAME: 'ViT-B-16'
+  STRIDE_SIZE: [16, 16]
+  TRAIN_STAGE: 1
+  PROMPT_LENGTH: 4
+
+  ID_LOSS_WEIGHT: 1.0
+  TRIPLET_LOSS_WEIGHT: 1.0
+  I2T_ID_WEIGHT: 0.0
+  I2T_CLOTH_SC_WEIGHT: 0.0
+  I2T_CLOTH_ORTHO_WEIGHT: 0.0   # 预实验验证有效，保持默认
+
+INPUT:
+  SIZE_TRAIN: [256,128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5
+  RE_PROB: 0.7
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+
+DATASETS:
+  NAMES: 'prcc'
+  ROOT_DIR: '/root/autodl-tmp/CCReID/data'
+  LLAVA_JSON_PATH: '/root/autodl-tmp/CCReID/data/prcc_qwen2_final_labels.json'
+
+DATALOADER:
+  SAMPLER: 'softmax_triplet'
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+SOLVER:
+  # Stage 1：60轮，预实验30轮已接近收敛，正式翻倍保证充分学习
+  STAGE1_MAX_EPOCHS: 0
+  STAGE1_BASE_LR: 0.00035
+
+  # Stage 2：30轮，Warmup 10轮（占比1/3，ViT微调标准做法）
+  STAGE2_MAX_EPOCHS: 15
+  STAGE2_BASE_LR: 0.000005
+  STAGE2_WARMUP_EPOCHS: 5
+
+  CHECKPOINT_PERIOD: 5       # 每10轮存一次，方便挑选最优权重
+  LOG_PERIOD: 50
+  IMS_PER_BATCH: 64
+  OPTIMIZER_NAME: "AdamW"
+  STEPS: [10, 15]             # Stage2 在第15、25轮衰减LR
+  GAMMA: 0.1
+  WARMUP_METHOD: 'linear'
+  WARMUP_FACTOR: 0.01
+  WEIGHT_DECAY: 0.0005
+  WEIGHT_DECAY_BIAS: 0.0001
+  LARGE_FC_LR: True
+  SEED: 1234
+  MARGIN: 0.3
+
+TEST:
+  EVALUATE_ONLY: 'False'
+  IMS_PER_BATCH: 128
+  RE_RANKING: 'False'
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: './logs/final_exp'
