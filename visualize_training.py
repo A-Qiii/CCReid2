@@ -361,59 +361,6 @@ def plot_decoupling_health(data_s2, output_dir, config_label):
     print(f"[已保存] {path}")
 
 
-# ============================================================
-def main():
-    parser = argparse.ArgumentParser(description="CC-ReID 训练可视化工具")
-    parser.add_argument('--log_dir',    type=str, default='./logs/exp_two_stage')
-    parser.add_argument('--output_dir', type=str, default='./vis_output')
-    args = parser.parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    exp_name = os.path.basename(os.path.normpath(args.log_dir))
-
-    s1_log_dir = os.path.join(args.log_dir, 'tensorboard', 'stage1')
-    s2_log_dir = os.path.join(args.log_dir, 'tensorboard', 'stage2')
-
-    print(f">>> 正在加载 Stage 1 日志: {s1_log_dir}")
-    data_s1   = load_scalars(s1_log_dir)
-    config_s1 = load_text_config(s1_log_dir)
-    print(f"    找到 {len(data_s1)} 个标量")
-
-    print(f">>> 正在加载 Stage 2 日志: {s2_log_dir}")
-    data_s2   = load_scalars(s2_log_dir)
-    config_s2 = load_text_config(s2_log_dir)
-    print(f"    找到 {len(data_s2)} 个标量")
-
-    # 生成配置水印文字
-    config_label = make_config_label(config_s1, config_s2, exp_name)
-    print(f"\n>>> 配置水印内容:\n{config_label}\n")
-
-    print(">>> 开始生成可视化图表...")
-    plot_stage1(data_s1, args.output_dir, config_label)
-    plot_stage1_cosine_probe(data_s1, args.output_dir, config_label)
-    plot_stage2(data_s2, args.output_dir, config_label)
-    plot_stage2_acc(data_s2, args.output_dir, config_label)
-    plot_two_stage_overview(data_s1, data_s2, args.output_dir, config_label)
-    plot_decoupling_health(data_s2, args.output_dir, config_label)
-
-    print_final_summary(data_s1, data_s2)
-    print(f"\n✅ 全部图表已保存至: {args.output_dir}")
-
-
-if __name__ == '__main__':
-    main()
-
-
-"""
-======================================================================
-将下方代码追加到 visualize_training.py 文件末尾，
-并在 main() 函数最后一行 print("✅ ...") 之前插入：
-
-    print_final_summary(data_s1, data_s2)
-
-======================================================================
-"""
-
 def print_final_summary(data_s1, data_s2, tail=50):
     """
     打印训练结束时各关键指标的数值摘要（取最后 tail 个点的均值）。
@@ -513,3 +460,58 @@ def print_final_summary(data_s1, data_s2, tail=50):
             print(f"  ⚠️  {p}")
 
     print(f"{SEP}\n")
+
+
+# ============================================================
+def main():
+    parser = argparse.ArgumentParser(description="CC-ReID 训练可视化工具")
+    parser.add_argument('--log_dir',    type=str, default='./logs/exp_two_stage')
+    parser.add_argument('--output_dir', type=str, default='./vis_output')
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    exp_name = os.path.basename(os.path.normpath(args.log_dir))
+
+    s1_log_dir = os.path.join(args.log_dir, 'tensorboard', 'stage1')
+    s2_log_dir = os.path.join(args.log_dir, 'tensorboard', 'stage2')
+
+    print(f">>> 正在加载 Stage 1 日志: {s1_log_dir}")
+    data_s1   = load_scalars(s1_log_dir)
+    config_s1 = load_text_config(s1_log_dir)
+    print(f"    找到 {len(data_s1)} 个标量")
+
+    print(f">>> 正在加载 Stage 2 日志: {s2_log_dir}")
+    data_s2   = load_scalars(s2_log_dir)
+    config_s2 = load_text_config(s2_log_dir)
+    print(f"    找到 {len(data_s2)} 个标量")
+
+    # 生成配置水印文字
+    config_label = make_config_label(config_s1, config_s2, exp_name)
+    print(f"\n>>> 配置水印内容:\n{config_label}\n")
+
+    print(">>> 开始生成可视化图表...")
+    plot_stage1(data_s1, args.output_dir, config_label)
+    plot_stage1_cosine_probe(data_s1, args.output_dir, config_label)
+    plot_stage2(data_s2, args.output_dir, config_label)
+    plot_stage2_acc(data_s2, args.output_dir, config_label)
+    plot_two_stage_overview(data_s1, data_s2, args.output_dir, config_label)
+    plot_decoupling_health(data_s2, args.output_dir, config_label)
+
+    print_final_summary(data_s1, data_s2)
+    print(f"\n✅ 全部图表已保存至: {args.output_dir}")
+
+
+if __name__ == '__main__':
+    main()
+
+
+"""
+======================================================================
+将下方代码追加到 visualize_training.py 文件末尾，
+并在 main() 函数最后一行 print("✅ ...") 之前插入：
+
+    print_final_summary(data_s1, data_s2)
+
+======================================================================
+"""
+

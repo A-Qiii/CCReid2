@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .clip import clip
 
 
@@ -228,10 +229,38 @@ class build_transformer(nn.Module):
         # ---- 视觉特征提取（所有阶段共用）----
         _, _, image_features_proj = self.image_encoder(x, None)
         global_feat = image_features_proj[:, 0]  # [B, 512]
-
-        # ---- 测试阶段：仅返回视觉特征 ----
+ 
+        # ---- 测试阶段：正交投影减除衣服成分（推理时利用 Proj_c）----
+        #
+        # 【原理】
+        #   Proj_c 在 Stage 2 训练中已学会提取衣服特征方向。
+        #   原版推理完全不用 Proj_c，衣服信息仍残留在 global_feat 里。
+        #   现在在推理时将 global_feat 沿衣服方向做正交投影减除：
+        #
+        #     f_cloth_dir = normalize(cloth_proj(f))
+        #     cloth_component = (f · f_cloth_dir) × f_cloth_dir
+        #     f_clean = f - λ × cloth_component
+        #
+        #   λ=0 退化为原版（完全不减除）
+        #   λ=1 完全减除衣服分量
+        #   推荐 λ=0.5 起步，可在不重新训练的情况下调参
+        #
         if not self.training:
-            return self.bottleneck(global_feat) if self.cfg.MODEL.NECK_FEAT == 'after' else global_feat
+            lam = getattr(self.cfg.MODEL, 'CLOTH_SUBTRACT_LAMBDA', 0.5)
+ 
+            if lam > 0:
+                with torch.no_grad():
+                    f_cloth = self.cloth_proj(global_feat)
+                    f_cloth_dir = F.normalize(f_cloth, dim=1)
+                    proj_len = (global_feat * f_cloth_dir).sum(dim=1, keepdim=True)
+                    cloth_component = proj_len * f_cloth_dir
+                    feat_clean = global_feat - lam * cloth_component
+            else:
+                feat_clean = global_feat
+ 
+            return self.bottleneck(feat_clean) if self.cfg.MODEL.NECK_FEAT == 'after' else feat_clean
+ 
+# ===== 复制到这里结束 =====
 
         # ========================================================
         # 阶段一：混合提示学习 (Hybrid Prompt Learning)
@@ -254,7 +283,7 @@ class build_transformer(nn.Module):
             cls_score = self.classifier(feat)
 
             # 步骤 A：提取衣服映射特征
-            f_img2clo = self.cloth_proj(global_feat)
+            f_img2clo = self.cloth_proj(global_feat.detach())
 
             # 步骤 B：获取当前 Batch 的真实衣服文本特征（用于 L_sc 监督）
             # 注意：prompt_learner 参数已冻结，此处 t_cloth_gt 显式 detach()

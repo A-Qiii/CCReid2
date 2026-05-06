@@ -28,6 +28,7 @@ cfg.MODEL.TRIPLET_LOSS_WEIGHT = 1.0
 cfg.MODEL.I2T_ID_WEIGHT = 1.0           # 对应 L_Guide (身份语义锚点牵引)
 cfg.MODEL.I2T_CLOTH_SC_WEIGHT = 1.0     # 对应 L_sc (语义剥离校验/监督 cloth_proj)
 cfg.MODEL.I2T_CLOTH_ORTHO_WEIGHT = 0.05 # 对应 L_de (截断余弦正交/外科手术排斥)
+cfg.MODEL.CLOTH_SUBTRACT_LAMBDA = 0.5   # 测试专用：衣服成分减除强度 λ (0.5 是经验值)
 
 cfg.MODEL.NECK = 'bnneck'
 cfg.MODEL.NECK_FEAT = 'before'
